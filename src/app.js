@@ -3,7 +3,7 @@ const cors       = require('@koa/cors');
 const bodyParser = require('koa-bodyparser');
 
 const stocksRoutes = require('./stocks/stocks.routes');
-const ordersRoutes = require('./orders/orders.routes');  // ← aquí
+const ordersRoutes = require('./orders/orders.routes');
 
 const app = new Koa();
 

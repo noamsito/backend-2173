@@ -22,20 +22,20 @@ class MqttClient extends EventEmitter {
     this.client = mqtt.connect(brokerUrl, options);
 
     this.client.on('connect', () => {
-      console.log('✅ Conectado a MQTT');
+      console.log('Conectado a MQTT');
       const topics = ['stocks/updates', 'stocks/requests'];
       this.client.subscribe(topics, (err, granted) => {
         if (err) {
-          console.error('❌ Error al suscribir:', err);
+          console.error('Error al suscribir:', err);
         } else {
-          console.log('🔔 Suscrito a:', granted.map(g => g.topic).join(', '));
+          console.log('Suscrito a:', granted.map(g => g.topic).join(', '));
         }
       });
     });
 
     this.client.on('message', (topic, payload) => {
       const msg = payload.toString();
-      console.log(`🟢 Mensaje en ${topic}: ${msg}`);
+      console.log(`Mensaje en ${topic}: ${msg}`);
       try {
         const data = JSON.parse(msg);
         if (topic === 'stocks/updates') {
@@ -44,16 +44,16 @@ class MqttClient extends EventEmitter {
           this.emit('request_response', data);
         }
       } catch (e) {
-        console.error('❌ JSON inválido:', msg);
+        console.error('JSON inválido:', msg);
       }
     });
 
     this.client.on('error', err => {
-      console.error('❌ Error MQTT:', err.message);
+      console.error('Error MQTT:', err.message);
     });
-    this.client.on('close',   ()  => console.log('🔌 Desconectado de MQTT'));
-    this.client.on('reconnect',() => console.log('⏳ Reintentando conexión MQTT…'));
-    this.client.on('offline',  ()  => console.log('🚫 Cliente MQTT offline'));
+    this.client.on('close',   ()  => console.log('Desconectado de MQTT'));
+    this.client.on('reconnect',() => console.log('Reintentando conexión MQTT…'));
+    this.client.on('offline',  ()  => console.log('Cliente MQTT offline'));
   }
 
   publishRequest(req) {
@@ -63,9 +63,9 @@ class MqttClient extends EventEmitter {
     const payload = JSON.stringify(req);
     this.client.publish('stocks/requests', payload, { qos: 1 }, err => {
       if (err) {
-        console.error('❌ Publish error:', err);
+        console.error('Publish error:', err);
       } else {
-        console.log('📤 Enviada solicitud:', req.request_id);
+        console.log('Enviada solicitud:', req.request_id);
       }
     });
   }
