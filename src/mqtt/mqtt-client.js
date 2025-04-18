@@ -1,71 +1,74 @@
-const fs = require('fs');
+require('dotenv').config();
 const mqtt = require('mqtt');
-const axios = require('axios');
 const EventEmitter = require('events');
 
-class MqttEmitter extends EventEmitter {}
-const mqttEmitter = new MqttEmitter();
-
-// Datos de conexión
-const brokerAddress = "broker.iic2173.org";
-const brokerPort = 9000;
-const username = "students";
-const password = "iic2173-2025-1-students";
-
-// Construir la URL de conexión
-const connectUrl = `mqtt://${brokerAddress}:${brokerPort}`;
-
-// Opciones de conexión (incluyendo las credenciales)
-const options = {
-  username: username,
-  password: password,
-};
-
-// Conectar al broker MQTT
-const client = mqtt.connect(connectUrl, options);
-
-// Configurar eventos
-client.on('connect', () => {
-  console.log('Conectado al broker MQTT');
-  
-  // Suscribirse al tópico 'stocks/info'
-  client.subscribe('stocks/info', (err) => {
-    if (err) {
-      console.error('Error al suscribirse al tópico stocks/info:', err);
-    } else {
-      console.log('Suscripción exitosa al tópico stocks/info');
-    }
-  });
-});
-
-// Evento para recibir mensajes
-client.on('message', (topic, message) => {
-  if (topic === 'stocks/info') {
-    const mensaje = message.toString();
-    console.log(`Mensaje recibido en ${topic}: ${mensaje}`);
-    // Emitir el evento para que index.js pueda escucharlo
-    mqttEmitter.emit('mqtt_message', { topic, message: mensaje });
-    
-    // (Opcional) Realizar una petición con axios
-    let stockData;
-  try {
-    stockData = JSON.parse(mensaje);
-  } catch (err) {
-    console.error("Error al parsear el mensaje JSON:", err);
-    return;
+class MqttClient extends EventEmitter {
+  constructor() {
+    super();
+    this.client = null;
   }
-  axios.post('http://localhost:3000/stocks', stockData)
-    .catch(err => console.error("Error en axios:", err));
+
+  async connect() {
+    const brokerUrl = `mqtt://${process.env.MQTT_HOST}:${process.env.MQTT_PORT}`;
+    const options = {
+      username:       process.env.MQTT_USER,
+      password:       process.env.MQTT_PASSWORD,
+      keepalive:      30,
+      reconnectPeriod:1000,
+      protocolVersion:4,
+      clean:          true
+    };
+
+    this.client = mqtt.connect(brokerUrl, options);
+
+    this.client.on('connect', () => {
+      console.log('✅ Conectado a MQTT');
+      const topics = ['stocks/updates', 'stocks/requests'];
+      this.client.subscribe(topics, (err, granted) => {
+        if (err) {
+          console.error('❌ Error al suscribir:', err);
+        } else {
+          console.log('🔔 Suscrito a:', granted.map(g => g.topic).join(', '));
+        }
+      });
+    });
+
+    this.client.on('message', (topic, payload) => {
+      const msg = payload.toString();
+      console.log(`🟢 Mensaje en ${topic}: ${msg}`);
+      try {
+        const data = JSON.parse(msg);
+        if (topic === 'stocks/updates') {
+          this.emit('market_update', data);
+        } else if (topic === 'stocks/requests') {
+          this.emit('request_response', data);
+        }
+      } catch (e) {
+        console.error('❌ JSON inválido:', msg);
+      }
+    });
+
+    this.client.on('error', err => {
+      console.error('❌ Error MQTT:', err.message);
+    });
+    this.client.on('close',   ()  => console.log('🔌 Desconectado de MQTT'));
+    this.client.on('reconnect',() => console.log('⏳ Reintentando conexión MQTT…'));
+    this.client.on('offline',  ()  => console.log('🚫 Cliente MQTT offline'));
+  }
+
+  publishRequest(req) {
+    if (!this.client || !this.client.connected) {
+      throw new Error('MQTT no conectado');
     }
-});
+    const payload = JSON.stringify(req);
+    this.client.publish('stocks/requests', payload, { qos: 1 }, err => {
+      if (err) {
+        console.error('❌ Publish error:', err);
+      } else {
+        console.log('📤 Enviada solicitud:', req.request_id);
+      }
+    });
+  }
+}
 
-client.on('error', (err) => {
-  console.error('Error en la conexión:', err);
-});
-
-client.on('close', () => {
-  console.log('Desconectado del broker MQTT');
-});
-
-// Exportar el emisor para que otros módulos puedan escucharlo
-module.exports = mqttEmitter;
+module.exports = new MqttClient();

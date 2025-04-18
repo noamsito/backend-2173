@@ -1,20 +1,28 @@
-require('dotenv').config();                 // carga variables de entorno de .env
-const app          = require('./app');
-const mqttClient   = require('./mqtt/mqtt-client');
+require('dotenv').config();
+const app           = require('./app');
+const mqttClient    = require('./mqtt/mqtt-client');
+const { sequelize } = require('./db/models');
+const StockService  = require('./stocks/stocks.service');
 
 const PORT = process.env.PORT || 3000;
 
-// Inicializa la conexión MQTT (dentro de mqtt-client.js exportas un método connect)
-mqttClient.connect()
-  .then(() => console.log('Conectado a MQTT'))
-  .catch(err => console.error('Error MQTT:', err));
+(async () => {
+  await mqttClient.connect();
 
-// Escucha el evento custom que emite mqtt-client.js
-mqttClient.on('mqtt_message', ({ topic, message }) => {
-  console.log(`MQTT → Tópico: ${topic}, Mensaje: ${message}`);
-});
+  // Crea la tabla si falta
+  await sequelize.sync();
 
-// Arranca el servidor HTTP
-app.listen(PORT, () => {
-  console.log(`Servidor escuchando en http://localhost:${PORT}`);
-});
+  // Al recibir cada update de mercado, guárdalo
+  mqttClient.on('market_update', async data => {
+    try {
+      await StockService.saveMarketUpdate(data);
+      console.log('💾 Market update guardado:', data.symbol, data.price);
+    } catch (err) {
+      console.error('❌ Error guardando update:', err);
+    }
+  });
+
+  app.listen(PORT, () => {
+    console.log(`🚀 Servidor escuchando en http://localhost:${PORT}`);
+  });
+})();
