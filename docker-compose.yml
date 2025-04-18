@@ -1,0 +1,66 @@
+services:
+  web:
+    build: .
+    container_name: e0-cmingom_web
+    ports:
+      - "3000:3000"
+    depends_on:
+      - db
+    environment:
+      - NODE_ENV=production
+    networks:
+      - app-network
+
+  db:
+    image: postgres:13
+    container_name: e0-cmingom_db
+    restart: always
+    environment:
+      POSTGRES_USER: arqui
+      POSTGRES_PASSWORD: arqui
+      POSTGRES_DB: arqui_production
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    networks:
+      - app-network
+
+  mqtt:
+    image: eclipse-mosquitto
+    container_name: e0-cmingom_mqtt
+    ports:
+      - "9000:9000"
+    networks:
+      - app-network
+
+  nginx:
+    image: nginx:latest
+    container_name: e0-cmingom_nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    depends_on:
+      - web
+    networks:
+      - app-network
+
+  certbot:
+    image: certbot/certbot
+    container_name: e0-cmingom_certbot
+    volumes:
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
+    networks:
+      - app-network
+
+networks:
+  app-network:
+
+volumes:
+  db_data:
