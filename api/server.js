@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import pg from 'pg';
 import dotenv from 'dotenv';
+import { auth } from 'express-oauth2-jwt-bearer';
 
 const Pool = pg.Pool;
 
@@ -10,6 +11,14 @@ const port = 3000;
 
 dotenv.config();
 
+// Configurar middleware de autenticación Auth0
+const checkJwt = auth({
+  audience: process.env.AUTH0_AUDIENCE,
+  issuerBaseURL: `https://${process.env.AUTH0_DOMAIN}/`,
+  tokenSigningAlg: 'RS256'
+});
+
+// Resto de la configuración de DB
 const pool = new Pool({
     user: process.env.DB_USER || 'postgres',
     host: process.env.DB_HOST || 'localhost',
@@ -152,6 +161,65 @@ app.get('/stocks/:symbol', async (req, res) => {
     } catch (error) {
         console.error("Error fetching stock details:", error, "Values:", values);
         res.status(500).json({ error: "Error fetching stock details" });
+    }
+});
+
+app.get('/user/profile', checkJwt, async (req, res) => {
+    try {
+        // El token ya está verificado por el middleware checkJwt
+        // auth0Id está disponible en req.auth.sub
+        const auth0Id = req.auth.sub;
+        
+        // Buscar usuario en la base de datos
+        const userQuery = `SELECT * FROM users WHERE auth0_id = $1`;
+        const userResult = await client.query(userQuery, [auth0Id]);
+        
+        if (userResult.rows.length === 0) {
+            return res.status(404).json({ error: "Usuario no encontrado" });
+        }
+        
+        const user = userResult.rows[0];
+        // No devolvemos información sensible
+        delete user.password;
+        
+        res.json({ status: "success", data: user });
+    } catch (error) {
+        console.error("Error obteniendo perfil de usuario:", error);
+        res.status(500).json({ error: "Error interno del servidor" });
+    }
+});
+
+app.post('/users/register', checkJwt, async (req, res) => {
+    try {
+        const { name, email } = req.body;
+        const auth0Id = req.auth.sub; // ID de Auth0 del token JWT
+        
+        // Verificar si el usuario ya existe
+        const checkQuery = `SELECT * FROM users WHERE auth0_id = $1`;
+        const checkResult = await client.query(checkQuery, [auth0Id]);
+        
+        if (checkResult.rows.length > 0) {
+            return res.status(409).json({ error: "El usuario ya existe" });
+        }
+        
+        // Insertar nuevo usuario
+        const insertQuery = `
+            INSERT INTO users (auth0_id, email, name, last_login)
+            VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+            RETURNING id, email, name, created_at;
+        `;
+        
+        const insertResult = await client.query(insertQuery, [auth0Id, email, name]);
+        
+        res.status(201).json({ 
+            status: "success", 
+            message: "Usuario registrado correctamente", 
+            data: insertResult.rows[0]
+        });
+        
+    } catch (error) {
+        console.error("Error registrando usuario:", error);
+        res.status(500).json({ error: "Error interno del servidor" });
     }
 });
 
