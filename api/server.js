@@ -59,16 +59,23 @@ try {
 // Función helper para registrar eventos
 async function logEvent(type, details) {
     try {
+        // Añadir timestamp al evento si no lo tiene
+        if (!details.timestamp) {
+            details.timestamp = new Date().toISOString();
+        }
+        
         const query = `
             INSERT INTO events (type, details)
             VALUES ($1, $2)
             RETURNING id
         `;
         
-        await client.query(query, [type, JSON.stringify(details)]);
-        console.log(`Evento ${type} registrado`);
+        const result = await client.query(query, [type, JSON.stringify(details)]);
+        console.log(`Evento ${type} registrado con ID ${result.rows[0].id}`);
+        return result.rows[0].id;
     } catch (error) {
         console.error("Error registrando evento:", error);
+        return null;
     }
 }
     
@@ -424,6 +431,9 @@ app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
             return res.status(400).json({ error: "Solicitud de compra inválida" });
         }
         
+        console.log(`Procesando solicitud de compra: ${quantity} acciones de ${symbol}`);
+        
+        
         // Obtener precio actual y disponibilidad de la acción
         const stockQuery = `
             SELECT * FROM stocks 
@@ -471,11 +481,13 @@ app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
         
         await client.query(purchaseQuery, [
             requestId, 
-            req.userId,  // Usamos req.userId proporcionado por el middleware
+            req.userId,
             symbol, 
             quantity, 
             stock.price
         ]);
+        
+        console.log(`Solicitud de compra registrada: ID ${requestId}`);
         
         // Reservar temporalmente la cantidad de acciones
         await client.query(`
@@ -484,23 +496,24 @@ app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
             WHERE id = $2
         `, [quantity, stock.id]);
         
-        // Publicar solicitud de compra al broker MQTT
-        const requestData = {
+        console.log(`Reservadas ${quantity} acciones de ${symbol} temporalmente`);
+        
+        // Crear el mensaje para el broker MQTT
+        const message = {
             request_id: requestId,
+            group_id: GROUP_ID,
             quantity: quantity,
-            symbol: symbol
+            symbol: symbol,
+            operation: "BUY"
         };
         
+        // Publicar solicitud de compra al broker MQTT
         await axios.post('http://mqtt-client:3000/publish', {
             topic: 'stocks/requests',
-            message: {
-                request_id: requestId,
-                group_id: GROUP_ID,
-                quantity: quantity,
-                symbol: symbol,
-                operation: "BUY"
-            }
+            message: message
         });
+        
+        console.log(`Solicitud enviada al broker MQTT: ${requestId}`);
         
         // Registrar evento
         await logEvent('PURCHASE_REQUEST', {
@@ -526,23 +539,65 @@ app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
 // Obtener compras del usuario (versión mejorada)
 app.get('/purchases', checkJwt, syncUser, async (req, res) => {
     try {
-        // Obtener compras del usuario
+        // Obtener compras del usuario con una consulta mejorada que evita duplicados
         const purchasesQuery = `
-            SELECT pr.*, s.long_name 
-            FROM purchase_requests pr
-            JOIN stocks s ON pr.symbol = s.symbol AND s.timestamp = (
-                SELECT MAX(timestamp) FROM stocks 
-                WHERE symbol = pr.symbol
+            WITH latest_stocks AS (
+                SELECT DISTINCT ON (symbol) symbol, long_name, price, timestamp
+                FROM stocks
+                ORDER BY symbol, timestamp DESC
             )
+            SELECT 
+                pr.id, 
+                pr.request_id, 
+                pr.symbol, 
+                pr.quantity, 
+                pr.price, 
+                pr.status, 
+                pr.reason,
+                pr.created_at,
+                ls.long_name
+            FROM purchase_requests pr
+            JOIN latest_stocks ls ON pr.symbol = ls.symbol
             WHERE pr.user_id = $1
             ORDER BY pr.created_at DESC
         `;
         
         const purchasesResult = await client.query(purchasesQuery, [req.userId]);
         
+        console.log(`Obtenidas ${purchasesResult.rows.length} compras para el usuario ${req.userId}`);
+        
         res.json({ data: purchasesResult.rows });
     } catch (error) {
         console.error("Error obteniendo compras:", error);
+        res.status(500).json({ error: "Error interno del servidor" });
+    }
+});
+
+// Añade esta ruta de depuración para verificar duplicados
+app.get('/debug/check-duplicates', async (req, res) => {
+    try {
+        const query = `
+            SELECT request_id, COUNT(*) as count
+            FROM purchase_requests
+            GROUP BY request_id
+            HAVING COUNT(*) > 1
+            ORDER BY count DESC
+        `;
+        
+        const result = await client.query(query);
+        
+        if (result.rows.length > 0) {
+            console.log(`Se encontraron ${result.rows.length} request_ids duplicados`);
+            res.json({ 
+                duplicates_found: true, 
+                duplicate_request_ids: result.rows
+            });
+        } else {
+            console.log("No se encontraron request_ids duplicados");
+            res.json({ duplicates_found: false });
+        }
+    } catch (error) {
+        console.error("Error verificando duplicados:", error);
         res.status(500).json({ error: "Error interno del servidor" });
     }
 });
@@ -556,7 +611,10 @@ app.post('/purchase-validation', async (req, res) => {
             return res.status(400).json({ error: "Datos de validación inválidos" });
         }
         
-        // NUEVO: Verificar si ya hemos procesado una validación final para este request_id
+        // Registrar para depuración
+        console.log(`Procesando validación para request_id: ${validation.request_id}, status: ${validation.status}`);
+        
+        // Verificar si ya hemos procesado una validación final para este request_id
         const checkQuery = `
             SELECT status 
             FROM purchase_requests 
@@ -592,6 +650,7 @@ app.post('/purchase-validation', async (req, res) => {
         ]);
         
         if (updateResult.rows.length === 0) {
+            console.log(`No se encontró la solicitud ${validation.request_id} en nuestra base de datos`);
             return res.status(404).json({ error: "Solicitud de compra no encontrada" });
         }
         
@@ -613,6 +672,8 @@ app.post('/purchase-validation', async (req, res) => {
                     updated_at = CURRENT_TIMESTAMP
                 WHERE user_id = $2
             `, [totalCost, purchase.user_id]);
+            
+            console.log(`Compra aceptada: descontado $${totalCost} de la wallet del usuario ${purchase.user_id}`);
         } 
         // Si la compra fue rechazada, devolver la cantidad reservada
         else if (validation.status === 'REJECTED' || validation.status === 'error') {
@@ -632,6 +693,8 @@ app.post('/purchase-validation', async (req, res) => {
                     SET quantity = quantity + $1 
                     WHERE id = $2
                 `, [purchase.quantity, stockResult.rows[0].id]);
+                
+                console.log(`Compra rechazada: devueltas ${purchase.quantity} acciones de ${purchase.symbol} al inventario`);
             }
         }
         
@@ -643,6 +706,7 @@ app.post('/purchase-validation', async (req, res) => {
 });
 
 // Procesar compra externa (de otros grupos)
+// Asegúrate de que esta ruta exista exactamente así
 app.post('/external-purchase', async (req, res) => {
     try {
         const purchase = req.body;
@@ -651,9 +715,11 @@ app.post('/external-purchase', async (req, res) => {
             return res.status(400).json({ error: "Datos de compra inválidos" });
         }
         
+        console.log(`Procesando compra externa: ${purchase.quantity} acciones de ${purchase.symbol}, request_id: ${purchase.request_id}`);
+        
         // Obtener la entrada más reciente de la acción
         const stockQuery = `
-            SELECT id FROM stocks 
+            SELECT id, quantity, symbol FROM stocks 
             WHERE symbol = $1 
             ORDER BY timestamp DESC 
             LIMIT 1
@@ -661,16 +727,31 @@ app.post('/external-purchase', async (req, res) => {
         
         const stockResult = await client.query(stockQuery, [purchase.symbol]);
         
-        if (stockResult.rows.length > 0) {
-            // Actualizar nuestro inventario de acciones
-            await client.query(`
-                UPDATE stocks 
-                SET quantity = quantity - $1 
-                WHERE id = $2
-            `, [purchase.quantity, stockResult.rows[0].id]);
+        if (stockResult.rows.length === 0) {
+            console.log(`Símbolo ${purchase.symbol} no encontrado para compra externa`);
+            return res.status(404).json({ error: `Símbolo ${purchase.symbol} no encontrado` });
         }
         
-        // Registrar evento de compra externa
+        const stock = stockResult.rows[0];
+        
+        // Verificar si hay suficientes acciones
+        if (stock.quantity < purchase.quantity) {
+            console.log(`No hay suficientes acciones de ${purchase.symbol} disponibles (tenemos ${stock.quantity}, se pidieron ${purchase.quantity})`);
+            return res.status(400).json({ 
+                error: `No hay suficientes acciones de ${purchase.symbol} disponibles` 
+            });
+        }
+        
+        // Actualizar cantidad de acciones
+        await client.query(`
+            UPDATE stocks 
+            SET quantity = quantity - $1 
+            WHERE id = $2
+        `, [purchase.quantity, stock.id]);
+        
+        console.log(`Actualizado inventario para compra externa: ${purchase.symbol}, -${purchase.quantity} acciones`);
+        
+        // Registrar evento
         await logEvent('EXTERNAL_PURCHASE', purchase);
         
         res.json({ status: "success" });
@@ -753,6 +834,8 @@ app.get('/check-request', async (req, res) => {
         
         const result = await client.query(query, [id]);
         const belongs = result.rows[0].count > 0;
+        
+        console.log(`Verificación de request_id ${id}: ${belongs ? 'Pertenece a nosotros' : 'No pertenece a nosotros'}`);
         
         res.json({ 
             request_id: id,

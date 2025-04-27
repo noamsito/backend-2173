@@ -110,68 +110,75 @@ async function handleStockUpdate(topic, messageStr) {
 async function handlePurchaseMessage(messageStr) {
     try {
         const purchaseData = JSON.parse(messageStr);
+        console.log("Mensaje recibido:", purchaseData);
         
-        // Registrar todas las solicitudes de compra en el log de eventos
-        await logEvent('PURCHASE_REQUEST', purchaseData);
+        // Registrar todos los mensajes para debugging
+        await logEvent('MQTT_MESSAGE', purchaseData);
         
-        // Debug de comparación de IDs - Mantener esto
-        console.log("Comparando grupos:", {
-            mensaje_group_id: purchaseData.group_id,
-            nuestro_group_id: GROUP_ID,
-            sonIguales: String(purchaseData.group_id) === String(GROUP_ID)
-        });
-        
-        // CASO 1: Es una respuesta de validación (para cualquier grupo)
-        if (purchaseData.request_id && (purchaseData.status === 'ACCEPTED' || 
-                                       purchaseData.status === 'REJECTED' || 
-                                       purchaseData.status === 'OK' || 
-                                       purchaseData.status === 'error')) {
+        // CASO 1: Es una respuesta (tiene status y kind=response)
+        if (purchaseData.status && purchaseData.kind === 'response') {
             
-            // PASO NUEVO: Verificar si esta respuesta corresponde a una solicitud nuestra
+            // Solo procesamos mensajes que tengan request_id
+            if (!purchaseData.request_id) {
+                console.log("Mensaje de respuesta sin request_id, ignorando:", purchaseData);
+                return;
+            }
+            
+            // Verificamos si esta respuesta es para una solicitud nuestra
             const isForOurRequest = await checkIfRequestBelongsToUs(purchaseData.request_id);
             
             if (isForOurRequest) {
                 console.log(`Procesando respuesta para nuestra solicitud: ${purchaseData.request_id}, status: ${purchaseData.status}`);
                 
-                // URL correcta sin manipulación
-                const endpointUrl = process.env.API_URL ? 
-                    `${process.env.API_URL.replace('/stocks', '')}/purchase-validation` : 
-                    "http://api:3000/purchase-validation";
-
-                await fetchWithRetry(endpointUrl, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: messageStr
-                }, "validación de compra");
+                // Solo procesamos respuestas finales (ACCEPTED, REJECTED, error)
+                // y evitamos procesar las confirmaciones de recepción (OK)
+                if (purchaseData.status !== 'OK') {
+                    const endpointUrl = "http://api:3000/purchase-validation";
+                    
+                    await fetchWithRetry(endpointUrl, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(purchaseData)
+                    }, "validación de compra");
+                } else {
+                    console.log(`Confirmación de recepción para nuestra solicitud: ${purchaseData.request_id}`);
+                }
             } else {
                 console.log(`Ignorando respuesta para solicitud ajena: ${purchaseData.request_id}`);
             }
         }
-        // CASO 2: Es una solicitud de compra de otro grupo
-        else if (purchaseData.group_id && 
-                 String(purchaseData.group_id) !== String(GROUP_ID) && 
-                 purchaseData.operation === "BUY") {
-            console.log(`Compra externa del grupo ${purchaseData.group_id} detectada`);
+        
+        // CASO 2: Es una solicitud de compra (tiene operation: "BUY")
+        else if (purchaseData.operation === "BUY") {
+            // Verificamos primero si el mensaje tiene un group_id válido
+            if (!purchaseData.group_id) {
+                console.log("Mensaje de compra sin group_id, ignorando:", purchaseData);
+                return;
+            }
             
-            // Reenviar la compra externa a nuestra API para actualizar inventario
-            const endpointUrl = process.env.API_URL ? 
-                `${process.env.API_URL.replace('/stocks', '')}/external-purchase` : 
-                "http://api:3000/external-purchase";
-            
-            await fetchWithRetry(endpointUrl, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: messageStr
-            }, "compra externa");
+            // Verificamos si la solicitud es de otro grupo (no nuestra)
+            if (String(purchaseData.group_id) !== String(GROUP_ID)) {
+                console.log(`Compra externa del grupo ${purchaseData.group_id} detectada para ${purchaseData.symbol}`);
+                
+                // Reenviar la compra externa a nuestra API para actualizar inventario
+                const endpointUrl = "http://api:3000/external-purchase";
+                
+                await fetchWithRetry(endpointUrl, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(purchaseData)
+                }, "compra externa");
+            } else {
+                console.log(`Ignorando nuestra propia solicitud de compra: ${purchaseData.request_id}`);
+            }
         } 
-        // CASO 3: Es nuestra propia solicitud de compra (ya se maneja bien)
-        else if (purchaseData.group_id && 
-                String(purchaseData.group_id) === String(GROUP_ID) &&
-                purchaseData.operation === "BUY") {
-            console.log("Ignorando nuestra propia solicitud de compra");
+        
+        // CASO 3: Mensaje desconocido o malformado
+        else {
+            console.log("Mensaje con formato desconocido, ignorando:", purchaseData);
         }
     } catch (err) {
-        console.error("Error procesando mensaje de compra:", err);
+        console.error("Error procesando mensaje:", err);
     }
 }
 
@@ -191,11 +198,15 @@ async function checkIfRequestBelongsToUs(requestId) {
         }
         
         const data = await response.json();
+        
+        // Imprimir resultado para depuración
+        console.log(`Verificación de propiedad para request_id ${requestId}: ${data.belongs_to_us ? 'Es nuestra' : 'No es nuestra'}`);
+        
         return data.belongs_to_us === true;
     } catch (err) {
         console.error(`Error verificando request_id ${requestId}:`, err);
-        // En caso de error, asumimos que es nuestra para no perder validaciones
-        return true;
+        // En caso de error, asumimos que NO es nuestra para evitar procesamiento incorrecto
+        return false;
     }
 }
 
@@ -208,24 +219,40 @@ async function fetchWithRetry(url, options, operationName = "operación") {
             console.log(`Intentando ${operationName} en ${url}...`);
             const response = await fetch(url, options);
             
+            // Capturar y mostrar más detalles sobre la respuesta
+            const responseText = await response.text();
+            console.log(`Respuesta (${response.status}): ${responseText}`);
+            
+            let responseData;
+            try {
+                responseData = JSON.parse(responseText);
+            } catch (e) {
+                responseData = { text: responseText };
+            }
+            
             if (response.ok) {
-                const data = await response.json();
-                console.log(`${operationName} procesada:`, data);
-                return data;
+                console.log(`${operationName} procesada:`, responseData);
+                return responseData;
             } else {
-                throw new Error(`Error HTTP! Status: ${response.status}`);
+                throw new Error(`Error HTTP! Status: ${response.status}, Mensaje: ${JSON.stringify(responseData)}`);
             }
         } catch (err) {
             retryCount++;
+            
             // Manejo especial para errores 404 (endpoints no encontrados)
-            if (err.message.includes("404") && retryCount >= 3) {
-                console.error(`Endpoint no encontrado para ${operationName}, saltando reintentos.`);
-                break;
+            if (err.message.includes("404")) {
+                console.error(`Endpoint no encontrado para ${operationName} (URL: ${url})`);
+                
+                // Solo intentar una vez más con errores 404
+                if (retryCount >= 2) {
+                    console.error(`Endpoint no encontrado para ${operationName}, saltando reintentos.`);
+                    break;
+                }
             }
             
             const delayIndex = Math.min(retryCount - 1, fibSequence.length - 1);
             const delayTime = fibSequence[delayIndex] * 1000;
-            console.error(`Error procesando ${operationName}, reintentando en ${delayTime/1000} segundos:`, err);
+            console.error(`Error procesando ${operationName}, reintentando en ${delayTime/1000} segundos:`, err.message);
             await new Promise(resolve => setTimeout(resolve, delayTime));
         }
     }
