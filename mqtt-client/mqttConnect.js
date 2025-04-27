@@ -68,12 +68,25 @@ client.on("message", (topic, message) => {
 
 async function handleStockUpdate(topic, messageStr) {
     try {
+        const stockData = JSON.parse(messageStr);
         const data = { topic, message: messageStr };
         
         // Intento con retraso fibonacci
         let maxRetries = 5;
         let retryCount = 0;
         let success = false;
+
+        // Registramos el evento primero según su tipo
+        if (stockData.kind === 'IPO') {
+            console.log("Procesando IPO para:", stockData.symbol);
+            await logEvent('IPO', stockData);
+        } else if (stockData.kind === 'EMIT') {
+            console.log("Procesando EMIT para:", stockData.symbol);
+            await logEvent('EMIT', stockData);
+        } else if (stockData.kind === 'UPDATE') {
+            console.log("Procesando actualización de precio para:", stockData.symbol);
+            await logEvent('PRICE_UPDATE', stockData);
+        }
         
         while (!success && retryCount < maxRetries) {
             try {
@@ -112,15 +125,12 @@ async function handlePurchaseMessage(messageStr) {
         const purchaseData = JSON.parse(messageStr);
         console.log("Mensaje recibido:", purchaseData);
         
-        // Registrar todos los mensajes para debugging
-        await logEvent('MQTT_MESSAGE', purchaseData);
-        
         // CASO 1: Es una respuesta (tiene status y kind=response)
         if (purchaseData.status && purchaseData.kind === 'response') {
             
             // Solo procesamos mensajes que tengan request_id
             if (!purchaseData.request_id) {
-                console.log("Mensaje de respuesta sin request_id, ignorando:", purchaseData);
+                console.log("Mensaje de respuesta sin request_id, ignorando");
                 return;
             }
             
@@ -152,7 +162,7 @@ async function handlePurchaseMessage(messageStr) {
         else if (purchaseData.operation === "BUY") {
             // Verificamos primero si el mensaje tiene un group_id válido
             if (!purchaseData.group_id) {
-                console.log("Mensaje de compra sin group_id, ignorando:", purchaseData);
+                console.log("Mensaje de compra sin group_id, ignorando");
                 return;
             }
             
@@ -161,6 +171,7 @@ async function handlePurchaseMessage(messageStr) {
                 console.log(`Compra externa del grupo ${purchaseData.group_id} detectada para ${purchaseData.symbol}`);
                 
                 // Reenviar la compra externa a nuestra API para actualizar inventario
+                // La API se encargará de registrar el evento de compra externa
                 const endpointUrl = "http://api:3000/external-purchase";
                 
                 await fetchWithRetry(endpointUrl, {
@@ -169,13 +180,13 @@ async function handlePurchaseMessage(messageStr) {
                     body: JSON.stringify(purchaseData)
                 }, "compra externa");
             } else {
-                console.log(`Ignorando nuestra propia solicitud de compra: ${purchaseData.request_id}`);
+                console.log(`Ignorando nuestra propia solicitud de compra: ${purchaseData.request_id || 'sin ID'}`);
             }
         } 
         
         // CASO 3: Mensaje desconocido o malformado
         else {
-            console.log("Mensaje con formato desconocido, ignorando:", purchaseData);
+            console.log("Mensaje con formato desconocido, ignorando");
         }
     } catch (err) {
         console.error("Error procesando mensaje:", err);

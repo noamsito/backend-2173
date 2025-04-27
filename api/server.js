@@ -64,15 +64,68 @@ async function logEvent(type, details) {
             details.timestamp = new Date().toISOString();
         }
         
-        const query = `
-            INSERT INTO events (type, details)
-            VALUES ($1, $2)
-            RETURNING id
-        `;
+        // Añadir descripción humanizada según el tipo de evento
+        let eventText = "";
         
-        const result = await client.query(query, [type, JSON.stringify(details)]);
-        console.log(`Evento ${type} registrado con ID ${result.rows[0].id}`);
-        return result.rows[0].id;
+        // Solo generamos descripciones para los 4 tipos de eventos que modifican el universo de acciones
+        switch(type) {
+            case 'IPO':
+                eventText = `Se realizó una IPO de ${details.quantity} acciones de ${details.symbol} (${details.long_name || ''}) a un precio de $${details.price} por acción.`;
+                break;
+                
+            case 'EMIT':
+                eventText = `Se realizó un EMIT de ${details.quantity} acciones adicionales de ${details.symbol} (${details.long_name || ''}) a un precio de $${details.price} por acción.`;
+                break;
+                
+            case 'PURCHASE_VALIDATION':
+                // Solo procesamos las compras aceptadas
+                if (details.status === 'ACCEPTED') {
+                    // Tratamos de obtener todos los datos relevantes
+                    const symbol = details.symbol;
+                    const quantity = details.quantity;
+                    const price = details.price;
+                    const totalCost = quantity && price ? (quantity * price).toFixed(2) : 'desconocido';
+                    
+                    eventText = `Compraste ${quantity || ''} acciones de ${symbol || ''} por un monto total de $${totalCost}.`;
+                }
+                break;
+                
+            case 'EXTERNAL_PURCHASE':
+                eventText = `El grupo ${details.group_id} compró ${details.quantity} acciones de ${details.symbol}.`;
+                break;
+        }
+        
+        // Solo registramos el evento si es uno de los 4 tipos que modifican el universo de acciones
+        // y si logramos generar un texto descriptivo
+        if (eventText && ['IPO', 'EMIT', 'PURCHASE_VALIDATION', 'EXTERNAL_PURCHASE'].includes(type)) {
+            // Añadir el texto al evento
+            details.event_text = eventText;
+            
+            const query = `
+                INSERT INTO events (type, details)
+                VALUES ($1, $2)
+                RETURNING id
+            `;
+            
+            const result = await client.query(query, [type, JSON.stringify(details)]);
+            console.log(`Evento ${type} registrado con ID ${result.rows[0].id}`);
+            return result.rows[0].id;
+        }
+        
+        // Para los otros tipos de eventos, solo registramos sin texto descriptivo
+        if (!['IPO', 'EMIT', 'PURCHASE_VALIDATION', 'EXTERNAL_PURCHASE'].includes(type)) {
+            const query = `
+                INSERT INTO events (type, details)
+                VALUES ($1, $2)
+                RETURNING id
+            `;
+            
+            const result = await client.query(query, [type, JSON.stringify(details)]);
+            console.log(`Evento ${type} registrado con ID ${result.rows[0].id}`);
+            return result.rows[0].id;
+        }
+        
+        return null;
     } catch (error) {
         console.error("Error registrando evento:", error);
         return null;
@@ -661,7 +714,10 @@ app.post('/purchase-validation', async (req, res) => {
         await logEvent('PURCHASE_VALIDATION', {
             request_id: validation.request_id,
             status: validation.status,
-            reason: validation.reason
+            reason: validation.reason,
+            symbol: purchase.symbol,
+            quantity: purchase.quantity,
+            price: purchase.price
         });
         
         // Si la compra fue aceptada, descontar de la billetera
@@ -764,28 +820,59 @@ app.post('/external-purchase', async (req, res) => {
 // ENDPOINTS DE LOG DE EVENTOS ==============================================
 
 // Registrar evento
-app.post('/events', async (req, res) => {
+app.get('/events', async (req, res) => {
     try {
-        const { type, details } = req.body;
+        const page = parseInt(req.query.page) || 1;
+        const count = parseInt(req.query.count) || 25;
+        const type = req.query.type;
         
-        if (!type || !details) {
-            return res.status(400).json({ error: "Datos de evento inválidos" });
-        }
+        const offset = (page - 1) * count;
         
-        const query = `
-            INSERT INTO events (type, details)
-            VALUES ($1, $2)
-            RETURNING id
+        let query = `
+            SELECT id, type, details, created_at 
+            FROM events
         `;
         
-        await client.query(query, [type, details]);
+        const params = [];
         
-        res.json({ status: "success" });
+        if (type && type !== 'ALL') {
+            query += ` WHERE type = $1`;
+            params.push(type);
+        } else {
+            // Si no hay tipo específico, filtramos para mostrar solo los 4 tipos de eventos relevantes
+            query += ` WHERE type IN ('IPO', 'EMIT', 'PURCHASE_VALIDATION', 'EXTERNAL_PURCHASE')`;
+            
+            // Para PURCHASE_VALIDATION, solo incluimos las aceptadas
+            query += ` AND (type != 'PURCHASE_VALIDATION' OR (type = 'PURCHASE_VALIDATION' AND details->>'status' = 'ACCEPTED'))`;
+        }
+        
+        query += ` ORDER BY created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+        params.push(count, offset);
+        
+        const result = await client.query(query, params);
+        
+        const formattedEvents = result.rows.map(event => {
+            // Aseguramos que details sea un objeto
+            const details = typeof event.details === 'string' ? 
+                JSON.parse(event.details) : event.details;
+            
+            // Formato de fecha
+            const formattedDate = new Date(event.created_at).toLocaleString();
+            
+            return {
+                ...event,
+                details,
+                formatted_date: formattedDate
+            };
+        });
+        
+        res.json({ data: formattedEvents });
     } catch (error) {
-        console.error("Error registrando evento:", error);
+        console.error("Error obteniendo eventos:", error);
         res.status(500).json({ error: "Error interno del servidor" });
     }
 });
+
 
 // Obtener eventos
 app.get('/events', async (req, res) => {
