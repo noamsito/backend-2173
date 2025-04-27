@@ -77,14 +77,25 @@ async function handleStockUpdate(topic, messageStr) {
         let success = false;
 
         // Registramos el evento primero según su tipo
+        // Pero verificamos que no intentemos registrar eventos para datos que ya procesamos
+        // usando el timestamp como identificador
         if (stockData.kind === 'IPO') {
             console.log("Procesando IPO para:", stockData.symbol);
-            await logEvent('IPO', stockData);
+            
+            // Solo registramos el evento, ya que el POST /stocks también registrará un evento
+            // Esto evita duplicados
+            console.log(`Recibido evento IPO para ${stockData.symbol}, enviando a API...`);
+            
         } else if (stockData.kind === 'EMIT') {
             console.log("Procesando EMIT para:", stockData.symbol);
-            await logEvent('EMIT', stockData);
+            
+            // Solo registramos el evento en la consola, ya que el POST /stocks registrará el evento
+            console.log(`Recibido evento EMIT para ${stockData.symbol}, enviando a API...`);
+            
         } else if (stockData.kind === 'UPDATE') {
             console.log("Procesando actualización de precio para:", stockData.symbol);
+            
+            // Para actualizaciones de precio podemos registrar un evento tipo UPDATE 
             await logEvent('PRICE_UPDATE', stockData);
         }
         

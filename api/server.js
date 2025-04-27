@@ -64,6 +64,32 @@ async function logEvent(type, details) {
             details.timestamp = new Date().toISOString();
         }
         
+        // Verificar si ya existe un evento similar para eventos que pueden duplicarse
+        if (['IPO', 'EMIT'].includes(type)) {
+            // Verificar eventos duplicados por símbolo, precio, cantidad y cercanía en el timestamp
+            const checkQuery = `
+                SELECT id FROM events 
+                WHERE type = $1 
+                AND details->>'symbol' = $2 
+                AND details->>'price' = $3 
+                AND details->>'quantity' = $4
+                AND created_at > NOW() - INTERVAL '5 minutes'
+            `;
+            
+            const checkResult = await client.query(checkQuery, [
+                type, 
+                details.symbol, 
+                details.price.toString(), 
+                details.quantity.toString()
+            ]);
+            
+            // Si ya existe un evento similar, no registramos uno nuevo
+            if (checkResult.rows.length > 0) {
+                console.log(`Evento ${type} para ${details.symbol} ya existe, no registrando duplicado`);
+                return checkResult.rows[0].id;
+            }
+        }
+        
         // Añadir descripción humanizada según el tipo de evento
         let eventText = "";
         
@@ -156,62 +182,26 @@ app.post('/stocks', async (req, res) => {
             const result = await client.query(insertQuery, values);
 
             console.log("New stock (IPO) saved to database:", result.rows[0]);
+            
+            // Registrar evento
+            await logEvent('IPO', {
+                symbol,
+                price,
+                long_name: longName,
+                quantity,
+                timestamp,
+                kind: 'IPO'
+            });
+            
             res.json({ status: "success", data: result.rows[0] });
+            
         } else if (kind === 'EMIT') {
             // Verificar si la stock ya existe
             const checkQuery = `SELECT * FROM stocks WHERE symbol = $1 ORDER BY timestamp DESC LIMIT 1;`;
             const checkResult = await client.query(checkQuery, [symbol]);
         
             if (checkResult.rows.length > 0) {
-                // La stock existe, insertamos una nueva entrada con los datos actualizados
-                const existingStock = checkResult.rows[0];
-                const insertQuery = `
-                    INSERT INTO stocks (symbol, price, long_name, quantity, timestamp)
-                    VALUES ($1, $2, $3, $4, $5)
-                    RETURNING *;
-                `;
-        
-                // Mantener el long_name existente si no viene en el mensaje
-                const existingLongName = existingStock.long_name;
-                
-                // Para EMIT, sumamos la nueva cantidad a la cantidad existente
-                const updatedQuantity = existingStock.quantity + quantity;
-                
-                const values = [
-                    symbol,
-                    price,                // Actualizamos al nuevo precio
-                    longName || existingLongName,
-                    updatedQuantity,      // Sumamos la cantidad nueva a la existente
-                    timestamp
-                ];
-        
-                const result = await client.query(insertQuery, values);
-        
-                console.log("Stock updated (EMIT):", result.rows[0]);
-                res.json({ status: "success", data: result.rows[0] });
-            } else {
-                // La stock no existe, pero la trataremos como una nueva (IPO)
-                console.log(`Symbol ${symbol} not found for EMIT, treating as new stock (IPO)`);
-                
-                const insertQuery = `
-                    INSERT INTO stocks (symbol, price, long_name, quantity, timestamp)
-                    VALUES ($1, $2, $3, $4, $5)
-                    RETURNING *;
-                `;
-        
-                const values = [symbol, price, longName, quantity, timestamp];
-                const result = await client.query(insertQuery, values);
-        
-                console.log("New stock from EMIT saved to database:", result.rows[0]);
-                res.json({ status: "success", data: result.rows[0] });
-            }
-        } else if (kind === 'EMIT') {
-            // Verificar si la stock ya existe
-            const checkQuery = `SELECT * FROM stocks WHERE symbol = $1 ORDER BY timestamp DESC LIMIT 1;`;
-            const checkResult = await client.query(checkQuery, [symbol]);
-        
-            if (checkResult.rows.length > 0) {
-                // La stock existe, ACTUALIZAMOS el registro existente en vez de crear uno nuevo
+                // La stock existe, actualizamos la entrada existente
                 const existingStock = checkResult.rows[0];
                 
                 // Para EMIT, sumamos la nueva cantidad a la cantidad existente
@@ -227,7 +217,7 @@ app.post('/stocks', async (req, res) => {
                     RETURNING *;
                 `;
                 
-                const values = [
+                const updateValues = [
                     existingStock.id,  // ID del registro existente
                     price,             // Actualizamos al nuevo precio
                     longName || existingStock.long_name, // Usamos el nombre nuevo o el existente
@@ -235,12 +225,23 @@ app.post('/stocks', async (req, res) => {
                     timestamp
                 ];
         
-                const result = await client.query(updateQuery, values);
+                const result = await client.query(updateQuery, updateValues);
         
                 console.log("Stock updated (EMIT):", result.rows[0]);
+                
+                // Registrar evento
+                await logEvent('EMIT', {
+                    symbol,
+                    price,
+                    long_name: longName || existingStock.long_name,
+                    quantity,
+                    timestamp,
+                    kind: 'EMIT'
+                });
+                
                 res.json({ status: "success", data: result.rows[0] });
             } else {
-                // La stock no existe, pero la trataremos como una nueva (IPO)
+                // La stock no existe, tratarla como una nueva (IPO)
                 console.log(`Symbol ${symbol} not found for EMIT, treating as new stock (IPO)`);
                 
                 const insertQuery = `
@@ -249,10 +250,21 @@ app.post('/stocks', async (req, res) => {
                     RETURNING *;
                 `;
         
-                const values = [symbol, price, longName, quantity, timestamp];
-                const result = await client.query(insertQuery, values);
+                const insertValues = [symbol, price, longName, quantity, timestamp];
+                const result = await client.query(insertQuery, insertValues);
         
                 console.log("New stock from EMIT saved to database:", result.rows[0]);
+                
+                // Registrar evento como IPO ya que es nuevo
+                await logEvent('IPO', {
+                    symbol,
+                    price,
+                    long_name: longName,
+                    quantity,
+                    timestamp,
+                    kind: 'IPO'
+                });
+                
                 res.json({ status: "success", data: result.rows[0] });
             }
         } else if (kind === 'UPDATE') {
@@ -271,7 +283,7 @@ app.post('/stocks', async (req, res) => {
                     RETURNING *;
                 `;
 
-                const values = [
+                const updateValues = [
                     symbol,
                     price,
                     existingStock.long_name,
@@ -279,7 +291,7 @@ app.post('/stocks', async (req, res) => {
                     timestamp
                 ];
 
-                const result = await client.query(insertQuery, values);
+                const result = await client.query(insertQuery, updateValues);
 
                 console.log("Stock price updated (UPDATE):", result.rows[0]);
                 res.json({ status: "success", data: result.rows[0] });
@@ -301,6 +313,8 @@ app.post('/stocks', async (req, res) => {
         res.status(500).json({ error: "Error processing stock data" });
     }
 });
+
+
 app.get('/stocks', async (req, res) => {
     const page = parseInt(req.query.page) || 1;
     const count = parseInt(req.query.count) || 25;
@@ -895,6 +909,31 @@ app.post('/external-purchase', async (req, res) => {
 // ENDPOINTS DE LOG DE EVENTOS ==============================================
 
 // Registrar evento
+// Registrar evento (endpoint para recibir eventos del cliente MQTT)
+// Registrar evento (endpoint para recibir eventos del cliente MQTT)
+app.post('/events', async (req, res) => {
+    try {
+        const { type, details } = req.body;
+        
+        if (!type || !details) {
+            return res.status(400).json({ error: "Tipo o detalles del evento faltantes" });
+        }
+        
+        // Usar la función de registrar evento que ahora verifica duplicados
+        const eventId = await logEvent(type, details);
+        
+        if (!eventId) {
+            return res.status(400).json({ error: "No se pudo registrar el evento" });
+        }
+        
+        res.json({ status: "success", id: eventId });
+    } catch (error) {
+        console.error("Error registrando evento:", error);
+        res.status(500).json({ error: "Error interno del servidor" });
+    }
+});
+
+// Obtener eventos
 app.get('/events', async (req, res) => {
     try {
         const page = parseInt(req.query.page) || 1;
@@ -948,38 +987,6 @@ app.get('/events', async (req, res) => {
     }
 });
 
-
-// Obtener eventos
-app.get('/events', async (req, res) => {
-    try {
-        const page = parseInt(req.query.page) || 1;
-        const count = parseInt(req.query.count) || 25;
-        const type = req.query.type;
-        
-        const offset = (page - 1) * count;
-        
-        let query = `
-            SELECT * FROM events
-        `;
-        
-        const params = [];
-        
-        if (type && type !== 'ALL') {
-            query += ` WHERE type = $1`;
-            params.push(type);
-        }
-        
-        query += ` ORDER BY created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
-        params.push(count, offset);
-        
-        const result = await client.query(query, params);
-        
-        res.json({ data: result.rows });
-    } catch (error) {
-        console.error("Error obteniendo eventos:", error);
-        res.status(500).json({ error: "Error interno del servidor" });
-    }
-});
 app.get('/check-request', async (req, res) => {
     try {
         const { id } = req.query;
