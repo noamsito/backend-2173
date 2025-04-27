@@ -13,9 +13,9 @@ dotenv.config();
 
 // Configurar middleware de autenticación Auth0
 const checkJwt = auth({
-  audience: process.env.AUTH0_AUDIENCE,
-  issuerBaseURL: `https://${process.env.AUTH0_DOMAIN}/`,
-  tokenSigningAlg: 'RS256'
+    audience: 'https://stockmarket-api/',
+    issuerBaseURL: 'https://dev-ouxdigl1l6bn6n3r.us.auth0.com/',
+    tokenSigningAlg: 'RS256'
 });
 
 // Resto de la configuración de DB
@@ -27,7 +27,10 @@ const pool = new Pool({
     password: process.env.DB_PASSWORD || 'password',
 });
 
-app.use(cors());
+app.use(cors({
+    origin: ['http://localhost:80', 'http://localhost', 'http://localhost:5173'],
+    credentials: true
+  }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
