@@ -13,6 +13,7 @@ services:
       - DB_PASSWORD=admin123
       - DB_NAME=stock_data
       - DB_PORT=5432
+      - GROUP_ID=1
     volumes:
       - ./mqtt-client:/app/mqtt-client
     restart: unless-stopped
