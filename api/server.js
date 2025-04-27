@@ -44,25 +44,7 @@ try {
     }
 } catch (error) {
     console.error("Error connecting to the database:", error);
-    
 }
-
-// const createTableQuery = `
-//     CREATE TABLE IF NOT EXISTS stocks (
-//         id SERIAL PRIMARY KEY,
-//         symbol VARCHAR(50),
-//         price FLOAT,
-//         short_name VARCHAR(100),
-//         long_name VARCHAR(255),
-//         quantity INT,
-//         timestamp TIMESTAMP
-//     );
-// `;
-
-// client.query(createTableQuery)
-//     .then(() => console.log("Table 'stocks' is ready."))
-//     .catch((err) => console.error("Error creating table:", err));
-
     
 app.post('/stocks', async (req, res) => {
     const { topic, message } = req.body;
@@ -73,26 +55,111 @@ app.post('/stocks', async (req, res) => {
 
     try {
         const stockData = JSON.parse(message);
+        const { symbol, price, longName, quantity, timestamp, kind } = stockData;
 
-        const insertQuery = `
-            INSERT INTO stocks (symbol, price, short_name, long_name, quantity, timestamp)
-            VALUES ($1, $2, $3, $4, $5, $6)
-            RETURNING *;
-        `;
+        // Verificar el tipo de actualización
+        if (kind === 'IPO') {
+            // Es una nueva stock, insertamos
+            const insertQuery = `
+                INSERT INTO stocks (symbol, price, long_name, quantity, timestamp)
+                VALUES ($1, $2, $3, $4, $5)
+                RETURNING *;
+            `;
 
-        const values = [
-            stockData.symbol,
-            stockData.price,
-            stockData.shortName,
-            stockData.longName,
-            stockData.quantity,
-            stockData.timestamp,
-        ];
+            const values = [symbol, price, longName, quantity, timestamp];
+            const result = await client.query(insertQuery, values);
 
-        const result = await client.query(insertQuery, values);
+            console.log("New stock (IPO) saved to database:", result.rows[0]);
+            res.json({ status: "success", data: result.rows[0] });
+        } else if (kind === 'EMIT') {
+            // Verificar si la stock ya existe
+            const checkQuery = `SELECT * FROM stocks WHERE symbol = $1 ORDER BY timestamp DESC LIMIT 1;`;
+            const checkResult = await client.query(checkQuery, [symbol]);
+        
+            if (checkResult.rows.length > 0) {
+                // La stock existe, insertamos una nueva entrada con los datos actualizados
+                const existingStock = checkResult.rows[0];
+                const insertQuery = `
+                    INSERT INTO stocks (symbol, price, long_name, quantity, timestamp)
+                    VALUES ($1, $2, $3, $4, $5)
+                    RETURNING *;
+                `;
+        
+                // Mantener el long_name existente si no viene en el mensaje
+                const existingLongName = existingStock.long_name;
+                
+                // Para EMIT, sumamos la nueva cantidad a la cantidad existente
+                const updatedQuantity = existingStock.quantity + quantity;
+                
+                const values = [
+                    symbol,
+                    price,                // Actualizamos al nuevo precio
+                    longName || existingLongName,
+                    updatedQuantity,      // Sumamos la cantidad nueva a la existente
+                    timestamp
+                ];
+        
+                const result = await client.query(insertQuery, values);
+        
+                console.log("Stock updated (EMIT):", result.rows[0]);
+                res.json({ status: "success", data: result.rows[0] });
+            } else {
+                // La stock no existe, pero la trataremos como una nueva (IPO)
+                console.log(`Symbol ${symbol} not found for EMIT, treating as new stock (IPO)`);
+                
+                const insertQuery = `
+                    INSERT INTO stocks (symbol, price, long_name, quantity, timestamp)
+                    VALUES ($1, $2, $3, $4, $5)
+                    RETURNING *;
+                `;
+        
+                const values = [symbol, price, longName, quantity, timestamp];
+                const result = await client.query(insertQuery, values);
+        
+                console.log("New stock from EMIT saved to database:", result.rows[0]);
+                res.json({ status: "success", data: result.rows[0] });
+            }
+        }else if (kind === 'UPDATE') {
+            // Este es un UPDATE, solo actualizamos el precio si la stock existe
+            const checkQuery = `SELECT * FROM stocks WHERE symbol = $1 ORDER BY timestamp DESC LIMIT 1;`;
+            const checkResult = await client.query(checkQuery, [symbol]);
 
-        console.log("New stock data saved to database:", result.rows[0]);
-        res.json({ status: "success", data: result.rows[0] });
+            if (checkResult.rows.length > 0) {
+                // La stock existe, insertamos una nueva entrada con el precio actualizado
+                // pero manteniendo los valores existentes para los otros campos
+                const existingStock = checkResult.rows[0];
+                
+                const insertQuery = `
+                    INSERT INTO stocks (symbol, price, long_name, quantity, timestamp)
+                    VALUES ($1, $2, $3, $4, $5)
+                    RETURNING *;
+                `;
+
+                const values = [
+                    symbol,
+                    price,
+                    existingStock.long_name,
+                    existingStock.quantity,
+                    timestamp
+                ];
+
+                const result = await client.query(insertQuery, values);
+
+                console.log("Stock price updated (UPDATE):", result.rows[0]);
+                res.json({ status: "success", data: result.rows[0] });
+            } else {
+                // La stock no existe, ignoramos este UPDATE
+                console.log(`Symbol ${symbol} not found for UPDATE, ignoring`);
+                res.status(404).json({ 
+                    status: "ignored", 
+                    message: `Symbol ${symbol} not found for UPDATE operation`
+                });
+            }
+        } else {
+            // Tipo de actualización desconocido
+            console.error("Unknown update kind:", kind);
+            res.status(400).json({ error: `Unknown update kind: ${kind}` });
+        }
     } catch (error) {
         console.error("Error processing stock data:", error);
         res.status(500).json({ error: "Error processing stock data" });
@@ -105,8 +172,8 @@ app.get('/stocks', async (req, res) => {
     const offset = (page - 1) * count;
 
     try {
-    const query = `
-    SELECT * FROM stocks
+        const query = `
+            SELECT * FROM stocks
             ORDER BY timestamp DESC
             LIMIT $1 OFFSET $2;
         `;
