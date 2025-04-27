@@ -4,9 +4,9 @@ import pg from 'pg';
 import dotenv from 'dotenv';
 import { auth } from 'express-oauth2-jwt-bearer';
 import { v4 as uuidv4 } from 'uuid';
-import './mqtt-client/mqttConnect.js';  // Importamos el cliente MQTT para que se ejecute
-import { publishPurchaseRequest } from './mqtt-client/mqttConnect.js';
 import { createSyncUserMiddleware } from './auth-integration.js';
+import mqtt from 'mqtt';
+
 const Pool = pg.Pool;
 
 const app = express();
@@ -25,7 +25,7 @@ const pool = new Pool({
 
 // Crear middleware de sincronización de usuarios - AHORA pool YA ESTÁ DEFINIDO
 const syncUser = createSyncUserMiddleware(pool);
-const GROUP_ID = process.env.GROUP_ID || "your-group-id";
+const GROUP_ID = process.env.GROUP_ID || "8";
 
 // Configurar middleware de autenticación Auth0
 const checkJwt = auth({
@@ -490,7 +490,18 @@ app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
             symbol: symbol
         };
         
-        publishPurchaseRequest(requestData);
+        await axios.post('http://mqtt-client:3000/publish', {
+            topic: 'stocks/requests',
+            message: {
+                request_id: requestId,
+                group_id: GROUP_ID,
+                timestamp: new Date().toISOString(),
+                quantity: quantity,
+                symbol: symbol,
+                stock_origin: 0,
+                operation: "BUY"
+            }
+            });
         
         // Registrar evento
         await logEvent('PURCHASE_REQUEST', {

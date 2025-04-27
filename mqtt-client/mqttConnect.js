@@ -2,6 +2,7 @@ import mqtt from "mqtt";
 import dotenv from "dotenv";
 import fetch from "node-fetch";
 import { v4 as uuidv4 } from 'uuid';
+import express from 'express';
 
 dotenv.config();
 
@@ -120,7 +121,9 @@ async function handlePurchaseMessage(messageStr) {
                                         purchaseData.status === 'error')) {
 
             // URL correcta sin manipulación
-            const endpointUrl = "http://api:3000/purchase-validation";
+            const endpointUrl = process.env.API_URL ? 
+                `${process.env.API_URL.replace('/stocks', '')}/purchase-validation` : 
+                "http://api:3000/purchase-validation";
 
             await fetchWithRetry(endpointUrl, {
             method: "POST",
@@ -151,33 +154,36 @@ async function handlePurchaseMessage(messageStr) {
 async function fetchWithRetry(url, options, operationName = "operación") {
     let maxRetries = 5;
     let retryCount = 0;
-    let success = false;
     
-    while (!success && retryCount < maxRetries) {
+    while (retryCount < maxRetries) {
         try {
+            console.log(`Intentando ${operationName} en ${url}...`);
             const response = await fetch(url, options);
             
             if (response.ok) {
                 const data = await response.json();
                 console.log(`${operationName} procesada:`, data);
-                success = true;
                 return data;
             } else {
                 throw new Error(`Error HTTP! Status: ${response.status}`);
             }
         } catch (err) {
-            const delayIndex = Math.min(retryCount, fibSequence.length - 1);
+            retryCount++;
+            // Manejo especial para errores 404 (endpoints no encontrados)
+            if (err.message.includes("404") && retryCount >= 3) {
+                console.error(`Endpoint no encontrado para ${operationName}, saltando reintentos.`);
+                break;
+            }
+            
+            const delayIndex = Math.min(retryCount - 1, fibSequence.length - 1);
             const delayTime = fibSequence[delayIndex] * 1000;
             console.error(`Error procesando ${operationName}, reintentando en ${delayTime/1000} segundos:`, err);
             await new Promise(resolve => setTimeout(resolve, delayTime));
-            retryCount++;
         }
     }
     
-    if (!success) {
-        console.error(`Máximo de intentos alcanzado al procesar ${operationName}`);
-        return null;
-    }
+    console.error(`Máximo de intentos alcanzado al procesar ${operationName}`);
+    return null;
 }
 
 async function logEvent(type, details) {
@@ -214,5 +220,20 @@ function publishPurchaseRequest(requestData) {
     return requestId;
 }
 
+
+// minisv
+const app = express();
+app.use(express.json());
+
+app.post('/publish', (req, res) => {
+  const { topic, message } = req.body;
+  client.publish(topic, JSON.stringify(message));
+  console.log(`Mensaje publicado en ${topic}:`, message);
+  res.json({ status: 'success' });
+});
+
+app.listen(3000, () => {
+  console.log('Servidor MQTT-Client escuchando en puerto 3000');
+});
 export default client;
 export { publishPurchaseRequest };
