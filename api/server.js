@@ -6,14 +6,24 @@ import { auth } from 'express-oauth2-jwt-bearer';
 import { v4 as uuidv4 } from 'uuid';
 import './mqtt-client/mqttConnect.js';  // Importamos el cliente MQTT para que se ejecute
 import { publishPurchaseRequest } from './mqtt-client/mqttConnect.js';
-import { createSyncUserMiddleware } from './auth0-integration.js';
+import { createSyncUserMiddleware } from './auth-integration.js';
 const Pool = pg.Pool;
 
 const app = express();
 const port = 3000;
 
 dotenv.config();
-// Crear middleware de sincronización de usuarios
+
+// Configuración de la base de datos - MOVER ESTO ANTES DE USAR pool
+const pool = new Pool({
+    user: process.env.DB_USER || 'postgres',
+    host: process.env.DB_HOST || 'localhost',
+    port: process.env.DB_PORT || 5432,
+    database: process.env.DB_NAME || 'postgres',
+    password: process.env.DB_PASSWORD || 'password',
+});
+
+// Crear middleware de sincronización de usuarios - AHORA pool YA ESTÁ DEFINIDO
 const syncUser = createSyncUserMiddleware(pool);
 const GROUP_ID = process.env.GROUP_ID || "your-group-id";
 
@@ -24,14 +34,6 @@ const checkJwt = auth({
     tokenSigningAlg: 'RS256'
 });
 
-// Configuración de la base de datos
-const pool = new Pool({
-    user: process.env.DB_USER || 'postgres',
-    host: process.env.DB_HOST || 'localhost',
-    port: process.env.DB_PORT || 5432,
-    database: process.env.DB_NAME || 'postgres',
-    password: process.env.DB_PASSWORD || 'password',
-});
 
 app.use(cors({
     origin: ['http://localhost:80', 'http://localhost', 'http://localhost:5173', process.env.FRONTEND_URL].filter(Boolean),
@@ -40,18 +42,6 @@ app.use(cors({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Añadir un middleware para depuración
-app.use((req, res, next) => {
-    if (req.headers.authorization) {
-        console.log("Authorization header presente");
-        if (req.auth) {
-            console.log("req.auth disponible:", Object.keys(req.auth));
-        } else {
-            console.log("req.auth no disponible");
-        }
-    }
-    next();
-});
 
 const client = await pool.connect();
 
@@ -718,6 +708,84 @@ app.get('/events', async (req, res) => {
     } catch (error) {
         console.error("Error obteniendo eventos:", error);
         res.status(500).json({ error: "Error interno del servidor" });
+    }
+});
+
+// Agregar este endpoint de depuración después de los demás endpoints
+
+// Endpoint de depuración de token JWT
+app.get('/debug/token', checkJwt, async (req, res) => {
+    try {
+        // 1. Extraer el token del encabezado
+        const authHeader = req.headers.authorization || '';
+        const token = authHeader.replace('Bearer ', '');
+        
+        // 2. Decodificar manualmente el token para mostrar su contenido
+        let decodedToken = null;
+        try {
+            const parts = token.split('.');
+            if (parts.length === 3) {
+                // Decodificar el payload (segunda parte del token)
+                const payload = Buffer.from(parts[1], 'base64').toString('utf8');
+                decodedToken = JSON.parse(payload);
+            }
+        } catch (err) {
+            console.error("Error decodificando token:", err);
+        }
+        
+        // 3. Verificar campos obligatorios para el registro
+        const auth0Id = req.auth?.payload?.sub || req.auth?.sub || decodedToken?.sub;
+        const email = req.auth?.payload?.email || req.auth?.email || decodedToken?.email;
+        const name = req.auth?.payload?.name || req.auth?.name || decodedToken?.name;
+        
+        // 4. Comprobar si el usuario existe en la base de datos
+        const client = await pool.connect();
+        let userExists = false;
+        
+        try {
+            const checkQuery = "SELECT * FROM users WHERE auth0_id = $1";
+            const checkResult = await client.query(checkQuery, [auth0Id]);
+            userExists = checkResult.rows.length > 0;
+            
+            if (userExists) {
+                console.log("Usuario encontrado en la base de datos:", checkResult.rows[0]);
+            } else {
+                console.log("El usuario no existe en la base de datos");
+            }
+        } finally {
+            client.release();
+        }
+        
+        res.json({
+            token_valid: !!req.auth,
+            token_format: {
+                has_req_auth: !!req.auth,
+                req_auth_keys: req.auth ? Object.keys(req.auth) : [],
+                req_auth_payload_keys: req.auth?.payload ? Object.keys(req.auth.payload) : []
+            },
+            user_info: {
+                auth0_id: auth0Id,
+                email: email,
+                name: name
+            },
+            required_fields_present: {
+                auth0_id: !!auth0Id,
+                email: !!email,
+                name: !!name
+            },
+            db_check: {
+                user_exists: userExists
+            },
+            decoded_payload: decodedToken
+        });
+        
+    } catch (error) {
+        console.error("Error en endpoint de depuración:", error);
+        res.status(500).json({ 
+            error: "Error en depuración", 
+            details: error.message,
+            stack: error.stack
+        });
     }
 });
 

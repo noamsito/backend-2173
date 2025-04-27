@@ -115,21 +115,19 @@ async function handlePurchaseMessage(messageStr) {
         
         // Si es una respuesta de validación (para cualquier grupo)
         if (purchaseData.request_id && (purchaseData.status === 'ACCEPTED' || 
-                                       purchaseData.status === 'REJECTED' || 
-                                       purchaseData.status === 'OK' || 
-                                       purchaseData.status === 'error')) {
-            
-            // Reenviar la validación a nuestra API
-            const endpointUrl = process.env.API_URL ? 
-                `${process.env.API_URL.replace('/stocks', '')}/purchase-validation` : 
-                "http://api:3000/purchase-validation";
-            
+                                        purchaseData.status === 'REJECTED' || 
+                                        purchaseData.status === 'OK' || 
+                                        purchaseData.status === 'error')) {
+
+            // URL correcta sin manipulación
+            const endpointUrl = "http://api:3000/purchase-validation";
+
             await fetchWithRetry(endpointUrl, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: messageStr
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: messageStr
             }, "validación de compra");
-        } 
+        }
         // Si es una solicitud de compra de otro grupo
         else if (purchaseData.group_id && purchaseData.group_id !== GROUP_ID && 
                  purchaseData.operation === "BUY") {
