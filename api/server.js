@@ -6,6 +6,7 @@ import { auth } from 'express-oauth2-jwt-bearer';
 import { v4 as uuidv4 } from 'uuid';
 import { createSyncUserMiddleware } from './auth-integration.js';
 import mqtt from 'mqtt';
+import axios from 'axios'; // Añade esta línea
 
 const Pool = pg.Pool;
 
@@ -25,7 +26,7 @@ const pool = new Pool({
 
 // Crear middleware de sincronización de usuarios - AHORA pool YA ESTÁ DEFINIDO
 const syncUser = createSyncUserMiddleware(pool);
-const GROUP_ID = process.env.GROUP_ID || "8";
+const GROUP_ID = process.env.GROUP_ID || "1";
 
 // Configurar middleware de autenticación Auth0
 const checkJwt = auth({
@@ -495,13 +496,11 @@ app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
             message: {
                 request_id: requestId,
                 group_id: GROUP_ID,
-                timestamp: new Date().toISOString(),
                 quantity: quantity,
                 symbol: symbol,
-                stock_origin: 0,
                 operation: "BUY"
             }
-            });
+        });
         
         // Registrar evento
         await logEvent('PURCHASE_REQUEST', {
@@ -548,8 +547,6 @@ app.get('/purchases', checkJwt, syncUser, async (req, res) => {
     }
 });
 
-// ENDPOINTS DE VALIDACIÓN Y PROCESAMIENTO DE COMPRAS =======================
-
 // Validación de compra (para las respuestas del broker)
 app.post('/purchase-validation', async (req, res) => {
     try {
@@ -557,6 +554,25 @@ app.post('/purchase-validation', async (req, res) => {
         
         if (!validation.request_id) {
             return res.status(400).json({ error: "Datos de validación inválidos" });
+        }
+        
+        // NUEVO: Verificar si ya hemos procesado una validación final para este request_id
+        const checkQuery = `
+            SELECT status 
+            FROM purchase_requests 
+            WHERE request_id = $1
+            AND status IN ('ACCEPTED', 'REJECTED')
+        `;
+        
+        const checkResult = await client.query(checkQuery, [validation.request_id]);
+        
+        // Si ya existe una validación final, no procesar esta
+        if (checkResult.rows.length > 0) {
+            console.log(`Validación duplicada para request_id ${validation.request_id}, ignorando`);
+            return res.json({ 
+                status: "ignored", 
+                message: `La solicitud ${validation.request_id} ya ha sido validada con estado ${checkResult.rows[0].status}`
+            });
         }
         
         // Actualizar estado de la solicitud de compra
@@ -721,7 +737,32 @@ app.get('/events', async (req, res) => {
         res.status(500).json({ error: "Error interno del servidor" });
     }
 });
-
+app.get('/check-request', async (req, res) => {
+    try {
+        const { id } = req.query;
+        
+        if (!id) {
+            return res.status(400).json({ error: "ID de solicitud no proporcionado" });
+        }
+        
+        const query = `
+            SELECT COUNT(*) as count 
+            FROM purchase_requests 
+            WHERE request_id = $1
+        `;
+        
+        const result = await client.query(query, [id]);
+        const belongs = result.rows[0].count > 0;
+        
+        res.json({ 
+            request_id: id,
+            belongs_to_us: belongs 
+        });
+    } catch (error) {
+        console.error("Error verificando solicitud:", error);
+        res.status(500).json({ error: "Error interno del servidor" });
+    }
+});
 // Agregar este endpoint de depuración después de los demás endpoints
 
 // Endpoint de depuración de token JWT

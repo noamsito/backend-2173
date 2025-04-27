@@ -18,7 +18,7 @@ const options = {
 
 const UPDATES_TOPIC = "stocks/updates";
 const REQUESTS_TOPIC = "stocks/requests";
-const GROUP_ID = process.env.GROUP_ID || "your-group-id"; // Cambiar por tu ID de grupo
+const GROUP_ID = process.env.GROUP_ID || "1"; // Cambiar por tu ID de grupo
 
 console.log("Conectando a MQTT broker:", options);
 
@@ -114,26 +114,44 @@ async function handlePurchaseMessage(messageStr) {
         // Registrar todas las solicitudes de compra en el log de eventos
         await logEvent('PURCHASE_REQUEST', purchaseData);
         
-        // Si es una respuesta de validación (para cualquier grupo)
+        // Debug de comparación de IDs - Mantener esto
+        console.log("Comparando grupos:", {
+            mensaje_group_id: purchaseData.group_id,
+            nuestro_group_id: GROUP_ID,
+            sonIguales: String(purchaseData.group_id) === String(GROUP_ID)
+        });
+        
+        // CASO 1: Es una respuesta de validación (para cualquier grupo)
         if (purchaseData.request_id && (purchaseData.status === 'ACCEPTED' || 
-                                        purchaseData.status === 'REJECTED' || 
-                                        purchaseData.status === 'OK' || 
-                                        purchaseData.status === 'error')) {
+                                       purchaseData.status === 'REJECTED' || 
+                                       purchaseData.status === 'OK' || 
+                                       purchaseData.status === 'error')) {
+            
+            // PASO NUEVO: Verificar si esta respuesta corresponde a una solicitud nuestra
+            const isForOurRequest = await checkIfRequestBelongsToUs(purchaseData.request_id);
+            
+            if (isForOurRequest) {
+                console.log(`Procesando respuesta para nuestra solicitud: ${purchaseData.request_id}, status: ${purchaseData.status}`);
+                
+                // URL correcta sin manipulación
+                const endpointUrl = process.env.API_URL ? 
+                    `${process.env.API_URL.replace('/stocks', '')}/purchase-validation` : 
+                    "http://api:3000/purchase-validation";
 
-            // URL correcta sin manipulación
-            const endpointUrl = process.env.API_URL ? 
-                `${process.env.API_URL.replace('/stocks', '')}/purchase-validation` : 
-                "http://api:3000/purchase-validation";
-
-            await fetchWithRetry(endpointUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: messageStr
-            }, "validación de compra");
+                await fetchWithRetry(endpointUrl, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: messageStr
+                }, "validación de compra");
+            } else {
+                console.log(`Ignorando respuesta para solicitud ajena: ${purchaseData.request_id}`);
+            }
         }
-        // Si es una solicitud de compra de otro grupo
-        else if (purchaseData.group_id && purchaseData.group_id !== GROUP_ID && 
+        // CASO 2: Es una solicitud de compra de otro grupo
+        else if (purchaseData.group_id && 
+                 String(purchaseData.group_id) !== String(GROUP_ID) && 
                  purchaseData.operation === "BUY") {
+            console.log(`Compra externa del grupo ${purchaseData.group_id} detectada`);
             
             // Reenviar la compra externa a nuestra API para actualizar inventario
             const endpointUrl = process.env.API_URL ? 
@@ -145,9 +163,39 @@ async function handlePurchaseMessage(messageStr) {
                 headers: { "Content-Type": "application/json" },
                 body: messageStr
             }, "compra externa");
+        } 
+        // CASO 3: Es nuestra propia solicitud de compra (ya se maneja bien)
+        else if (purchaseData.group_id && 
+                String(purchaseData.group_id) === String(GROUP_ID) &&
+                purchaseData.operation === "BUY") {
+            console.log("Ignorando nuestra propia solicitud de compra");
         }
     } catch (err) {
         console.error("Error procesando mensaje de compra:", err);
+    }
+}
+
+// Nueva función para verificar si un request_id pertenece a nuestro grupo
+async function checkIfRequestBelongsToUs(requestId) {
+    try {
+        // Consultar a la API si este request_id está en nuestra base de datos
+        const endpointUrl = process.env.API_URL ? 
+            `${process.env.API_URL.replace('/stocks', '')}/check-request?id=${requestId}` : 
+            `http://api:3000/check-request?id=${requestId}`;
+            
+        const response = await fetch(endpointUrl);
+        
+        if (!response.ok) {
+            console.log(`Request ID ${requestId} no encontrado en nuestra base de datos`);
+            return false;
+        }
+        
+        const data = await response.json();
+        return data.belongs_to_us === true;
+    } catch (err) {
+        console.error(`Error verificando request_id ${requestId}:`, err);
+        // En caso de error, asumimos que es nuestra para no perder validaciones
+        return true;
     }
 }
 
@@ -208,11 +256,9 @@ function publishPurchaseRequest(requestData) {
     const message = {
         request_id: requestId,
         group_id: GROUP_ID,
-        timestamp: new Date().toISOString(),
         quantity: requestData.quantity,
         symbol: requestData.symbol,
-        stock_origin: 0, // Siempre 0 según los requisitos
-        operation: "BUY" // Siempre "BUY" según los requisitos
+        operation: "BUY"
     };
     
     client.publish(REQUESTS_TOPIC, JSON.stringify(message));
