@@ -305,15 +305,90 @@ app.get('/stocks', async (req, res) => {
     const page = parseInt(req.query.page) || 1;
     const count = parseInt(req.query.count) || 25;
     const offset = (page - 1) * count;
+    
+    // Obtener parámetros de filtrado
+    const { 
+        symbol, 
+        name, 
+        minPrice, 
+        maxPrice, 
+        minQuantity, 
+        maxQuantity, 
+        date 
+    } = req.query;
 
     try {
-        const query = `
+        let query = `
             SELECT DISTINCT ON (symbol) *
             FROM stocks
-            ORDER BY symbol, timestamp DESC
-            LIMIT $1 OFFSET $2;
         `;
-        const result = await client.query(query, [count, offset]);
+        
+        const values = [];
+        let paramIndex = 1;
+        let whereClauseAdded = false;
+        
+        // Construir la cláusula WHERE con los filtros
+        if (symbol) {
+            query += whereClauseAdded ? ' AND ' : ' WHERE ';
+            query += `symbol ILIKE $${paramIndex}`;
+            values.push(`%${symbol}%`);
+            paramIndex++;
+            whereClauseAdded = true;
+        }
+        
+        if (name) {
+            query += whereClauseAdded ? ' AND ' : ' WHERE ';
+            query += `long_name ILIKE $${paramIndex}`;
+            values.push(`%${name}%`);
+            paramIndex++;
+            whereClauseAdded = true;
+        }
+        
+        if (minPrice) {
+            query += whereClauseAdded ? ' AND ' : ' WHERE ';
+            query += `price >= $${paramIndex}`;
+            values.push(parseFloat(minPrice));
+            paramIndex++;
+            whereClauseAdded = true;
+        }
+        
+        if (maxPrice) {
+            query += whereClauseAdded ? ' AND ' : ' WHERE ';
+            query += `price <= $${paramIndex}`;
+            values.push(parseFloat(maxPrice));
+            paramIndex++;
+            whereClauseAdded = true;
+        }
+        
+        if (minQuantity) {
+            query += whereClauseAdded ? ' AND ' : ' WHERE ';
+            query += `quantity >= $${paramIndex}`;
+            values.push(parseInt(minQuantity));
+            paramIndex++;
+            whereClauseAdded = true;
+        }
+        
+        if (maxQuantity) {
+            query += whereClauseAdded ? ' AND ' : ' WHERE ';
+            query += `quantity <= $${paramIndex}`;
+            values.push(parseInt(maxQuantity));
+            paramIndex++;
+            whereClauseAdded = true;
+        }
+        
+        if (date) {
+            query += whereClauseAdded ? ' AND ' : ' WHERE ';
+            query += `timestamp::date = $${paramIndex}`;
+            values.push(date);
+            paramIndex++;
+            whereClauseAdded = true;
+        }
+        
+        // Completar la query con ORDER BY, LIMIT y OFFSET
+        query += ` ORDER BY symbol, timestamp DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+        values.push(count, offset);
+
+        const result = await client.query(query, values);
         res.json({ status: "success", data: result.rows });
     } catch (error) {
         console.error("Error fetching stocks:", error);
