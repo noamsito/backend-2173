@@ -6,14 +6,15 @@ import { auth } from 'express-oauth2-jwt-bearer';
 import { v4 as uuidv4 } from 'uuid';
 import './mqtt-client/mqttConnect.js';  // Importamos el cliente MQTT para que se ejecute
 import { publishPurchaseRequest } from './mqtt-client/mqttConnect.js';
-
+import { createSyncUserMiddleware } from './auth0-integration.js';
 const Pool = pg.Pool;
 
 const app = express();
 const port = 3000;
 
 dotenv.config();
-
+// Crear middleware de sincronización de usuarios
+const syncUser = createSyncUserMiddleware(pool);
 const GROUP_ID = process.env.GROUP_ID || "your-group-id";
 
 // Configurar middleware de autenticación Auth0
@@ -320,13 +321,16 @@ app.get('/stocks/:symbol', async (req, res) => {
 });
 
 // Endpoints de perfil y registro existentes
-app.get('/user/profile', checkJwt, async (req, res) => {
+app.get('/user/profile', checkJwt, syncUser, async (req, res) => {
     try {
-        const auth0Id = req.auth.sub;
-        
-        // Buscar usuario en la base de datos
-        const userQuery = `SELECT * FROM users WHERE auth0_id = $1`;
-        const userResult = await client.query(userQuery, [auth0Id]);
+        // El usuario ya está sincronizado por el middleware
+        const userQuery = `
+            SELECT u.*, w.balance 
+            FROM users u 
+            LEFT JOIN wallet w ON u.id = w.user_id 
+            WHERE u.id = $1
+        `;
+        const userResult = await client.query(userQuery, [req.userId]);
         
         if (userResult.rows.length === 0) {
             return res.status(404).json({ error: "Usuario no encontrado" });
@@ -341,45 +345,15 @@ app.get('/user/profile', checkJwt, async (req, res) => {
     }
 });
 
-app.post('/users/register', checkJwt, async (req, res) => {
+// Endpoint de registro (se mantiene para compatibilidad, pero no es necesario usarlo)
+app.post('/users/register', checkJwt, syncUser, async (req, res) => {
     try {
-        const { name, email } = req.body;
-        const auth0Id = req.auth.payload.sub;  // Extrae el ID del payload
-        
-        console.log("Intentando registrar usuario:", { auth0Id, name, email });
-        
-        // Verificar datos
-        if (!auth0Id) {
-            return res.status(400).json({ error: "ID de Auth0 no disponible" });
-        }
-        
-        if (!email) {
-            return res.status(400).json({ error: "Email es requerido" });
-        }
-        
-        // Verificar si el usuario ya existe
-        const checkQuery = `SELECT * FROM users WHERE auth0_id = $1`;
-        const checkResult = await client.query(checkQuery, [auth0Id]);
-        
-        if (checkResult.rows.length > 0) {
-            return res.status(409).json({ error: "El usuario ya existe" });
-        }
-        
-        // Insertar nuevo usuario
-        const insertQuery = `
-            INSERT INTO users (auth0_id, email, name, last_login)
-            VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
-            RETURNING id, email, name, created_at;
-        `;
-        
-        const insertResult = await client.query(insertQuery, [auth0Id, email, name]);
-        
-        res.status(201).json({ 
+        // El usuario ya ha sido sincronizado en este punto
+        res.status(200).json({ 
             status: "success", 
             message: "Usuario registrado correctamente", 
-            data: insertResult.rows[0]
+            data: { id: req.userId }
         });
-        
     } catch (error) {
         console.error("Error registrando usuario:", error);
         res.status(500).json({ error: "Error interno del servidor" });
@@ -388,40 +362,58 @@ app.post('/users/register', checkJwt, async (req, res) => {
 
 // NUEVOS ENDPOINTS PARA WALLET ==============================================
 
-// Obtener saldo de la billetera
-app.get('/wallet/balance', checkJwt, async (req, res) => {
+// Endpoint de depósito en wallet corregido
+app.post('/wallet/deposit', checkJwt, syncUser, async (req, res) => {
     try {
-        const auth0Id = req.auth.sub;
+        const { amount } = req.body;
         
-        // Obtener ID de usuario
-        const userQuery = `SELECT id FROM users WHERE auth0_id = $1`;
-        const userResult = await client.query(userQuery, [auth0Id]);
-        
-        if (userResult.rows.length === 0) {
-            return res.status(404).json({ error: "Usuario no encontrado" });
+        if (!amount || isNaN(parseFloat(amount)) || parseFloat(amount) <= 0) {
+            return res.status(400).json({ error: "Monto de depósito inválido" });
         }
         
-        const userId = userResult.rows[0].id;
+        const amountValue = parseFloat(amount);
         
+        // Actualizar wallet
+        const updateQuery = `
+            UPDATE wallet
+            SET balance = balance + $2, updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = $1
+            RETURNING balance
+        `;
+        
+        const updateResult = await client.query(updateQuery, [req.userId, amountValue]);
+        
+        const newBalance = updateResult.rows[0].balance;
+        
+        // Registrar evento
+        await logEvent('WALLET_DEPOSIT', { 
+            user_id: req.userId, 
+            amount: amountValue, 
+            new_balance: newBalance 
+        });
+        
+        res.json({ balance: newBalance });
+    } catch (error) {
+        console.error("Error al depositar en billetera:", error);
+        res.status(500).json({ 
+            error: "Error interno del servidor al depositar", 
+            details: error.message
+        });
+    }
+});
+
+// Obtener saldo de la billetera (versión mejorada)
+app.get('/wallet/balance', checkJwt, syncUser, async (req, res) => {
+    try {
         // Obtener saldo de la billetera
         const walletQuery = `
             SELECT balance FROM wallet 
             WHERE user_id = $1
         `;
         
-        let walletResult = await client.query(walletQuery, [userId]);
+        const walletResult = await client.query(walletQuery, [req.userId]);
         
-        // Si la billetera no existe, crearla
-        if (walletResult.rows.length === 0) {
-            const createWalletQuery = `
-                INSERT INTO wallet (user_id, balance) 
-                VALUES ($1, 0) 
-                RETURNING balance
-            `;
-            walletResult = await client.query(createWalletQuery, [userId]);
-        }
-        
-        const balance = walletResult.rows[0].balance;
+        const balance = walletResult.rows[0]?.balance || 0;
         
         res.json({ balance });
     } catch (error) {
@@ -430,105 +422,16 @@ app.get('/wallet/balance', checkJwt, async (req, res) => {
     }
 });
 
-// Depositar en la billetera
-app.post('/wallet/deposit', checkJwt, async (req, res) => {
-    try {
-        // Verificar que tengamos datos suficientes para crear el usuario
-        // Extraer email y name del payload
-        const auth0Id = req.auth.payload.sub;
-        
-        // Si tienes email y name en el token, úsalos
-        const email = req.auth.payload.email;
-        const name = req.auth.payload.name || "Usuario";
-        
-        // Si no tienes email en el token, intenta obtenerlo del profile
-        if (!email) {
-            return res.status(400).json({ 
-                error: "Datos insuficientes para crear el usuario",
-                details: "El token de autenticación no contiene una dirección de correo electrónico. Intenta registrarte primero usando el endpoint /users/register"
-            });
-        }
-        
-        console.log("Creando usuario con:", { auth0Id, email, name });
-        
-        const insertUserQuery = `
-            INSERT INTO users (auth0_id, email, name, last_login)
-            VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
-            RETURNING id
-        `;
-        
-        const userInsertResult = await client.query(insertUserQuery, [
-            auth0Id,  // Aseguramos que auth0Id no sea null
-            email,
-            name
-        ]);
-        
-        const userId = userInsertResult.rows[0].id;
-        console.log("Usuario creado con ID:", userId);
-        
-        // Verificar si ya existe una wallet
-        const checkWalletQuery = `SELECT id, balance FROM wallet WHERE user_id = $1`;
-        const walletCheck = await client.query(checkWalletQuery, [userId]);
-        
-        let updateResult;
-        if (walletCheck.rows.length === 0) {
-            console.log("Wallet no encontrada, creando nueva con balance:", amount);
-            // Crear wallet
-            const createWalletQuery = `
-                INSERT INTO wallet (user_id, balance) 
-                VALUES ($1, $2)
-                RETURNING balance
-            `;
-            updateResult = await client.query(createWalletQuery, [userId, amount]);
-        } else {
-            console.log("Actualizando wallet existente, balance anterior:", walletCheck.rows[0].balance);
-            // Actualizar wallet existente
-            const updateQuery = `
-                UPDATE wallet
-                SET balance = balance + $2, updated_at = CURRENT_TIMESTAMP
-                WHERE user_id = $1
-                RETURNING balance
-            `;
-            updateResult = await client.query(updateQuery, [userId, amount]);
-        }
-        
-        const newBalance = updateResult.rows[0].balance;
-        console.log("Nuevo balance:", newBalance);
-        
-        // Registrar evento
-        await logEvent('WALLET_DEPOSIT', { user_id: userId, amount, new_balance: newBalance });
-        
-        res.json({ balance: newBalance });
-    } catch (error) {
-        console.error("Error detallado al depositar en billetera:", error);
-        res.status(500).json({ 
-            error: "Error interno del servidor al depositar", 
-            details: error.message
-        });
-    }
-});
-
 // ENDPOINTS DE COMPRA DE ACCIONES ===========================================
 
-// Comprar acciones
-app.post('/stocks/buy', checkJwt, async (req, res) => {
+// Comprar acciones (versión mejorada)
+app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
     try {
         const { symbol, quantity } = req.body;
-        const auth0Id = req.auth.sub;
         
         if (!symbol || !quantity || quantity <= 0) {
             return res.status(400).json({ error: "Solicitud de compra inválida" });
         }
-        
-        // Obtener ID de usuario
-        const userQuery = `SELECT id FROM users WHERE auth0_id = $1`;
-        const userResult = await client.query(userQuery, [auth0Id]);
-        
-        if (userResult.rows.length === 0) {
-            return res.status(404).json({ error: "Usuario no encontrado" });
-        }
-        
-        const userId = userResult.rows[0].id;
         
         // Obtener precio actual y disponibilidad de la acción
         const stockQuery = `
@@ -558,7 +461,7 @@ app.post('/stocks/buy', checkJwt, async (req, res) => {
             WHERE user_id = $1
         `;
         
-        const walletResult = await client.query(walletQuery, [userId]);
+        const walletResult = await client.query(walletQuery, [req.userId]);
         
         if (walletResult.rows.length === 0 || walletResult.rows[0].balance < totalCost) {
             return res.status(400).json({ error: "Fondos insuficientes" });
@@ -577,7 +480,7 @@ app.post('/stocks/buy', checkJwt, async (req, res) => {
         
         await client.query(purchaseQuery, [
             requestId, 
-            userId, 
+            req.userId,  // Usamos req.userId proporcionado por el middleware
             symbol, 
             quantity, 
             stock.price
@@ -602,7 +505,7 @@ app.post('/stocks/buy', checkJwt, async (req, res) => {
         // Registrar evento
         await logEvent('PURCHASE_REQUEST', {
             request_id: requestId,
-            user_id: userId,
+            user_id: req.userId,
             symbol: symbol,
             quantity: quantity,
             price: stock.price,
@@ -620,21 +523,9 @@ app.post('/stocks/buy', checkJwt, async (req, res) => {
     }
 });
 
-// Obtener compras del usuario
-app.get('/purchases', checkJwt, async (req, res) => {
+// Obtener compras del usuario (versión mejorada)
+app.get('/purchases', checkJwt, syncUser, async (req, res) => {
     try {
-        const auth0Id = req.auth.sub;
-        
-        // Obtener ID de usuario
-        const userQuery = `SELECT id FROM users WHERE auth0_id = $1`;
-        const userResult = await client.query(userQuery, [auth0Id]);
-        
-        if (userResult.rows.length === 0) {
-            return res.status(404).json({ error: "Usuario no encontrado" });
-        }
-        
-        const userId = userResult.rows[0].id;
-        
         // Obtener compras del usuario
         const purchasesQuery = `
             SELECT pr.*, s.long_name 
@@ -647,7 +538,7 @@ app.get('/purchases', checkJwt, async (req, res) => {
             ORDER BY pr.created_at DESC
         `;
         
-        const purchasesResult = await client.query(purchasesQuery, [userId]);
+        const purchasesResult = await client.query(purchasesQuery, [req.userId]);
         
         res.json({ data: purchasesResult.rows });
     } catch (error) {
