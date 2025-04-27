@@ -13,6 +13,8 @@ services:
       - DB_PASSWORD=admin123
       - DB_NAME=stock_data
       - DB_PORT=5432
+    volumes:
+      - ./mqtt-client:/app/mqtt-client
     restart: unless-stopped
 
   mqtt-client:
@@ -24,7 +26,7 @@ services:
       - PORT=9000
       - USERNAME=students
       - PASSWORD=iic2173-2025-1-students
-      - API_URL=http://api:3000/stocks  
+      - API_URL=http://api:3000/stocks
     restart: unless-stopped
 
   db:
