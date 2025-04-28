@@ -14,6 +14,9 @@ services:
       - DB_NAME=stock_data
       - DB_PORT=5432
       - GROUP_ID=1
+      - NEW_RELIC_LICENSE_KEY=2a9b48ca67bc5211688f3a68d3e25d09FFFFNRAL
+      - NEW_RELIC_APP_NAME=new_relic_back
+      - NEW_RELIC_LOG=stdout
     volumes:
       - ./mqtt-client:/app/mqtt-client
     restart: unless-stopped
