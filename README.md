@@ -75,3 +75,103 @@ Se implementó el requisito variable de HTTPS:
 │   └── tables.sql
 └──docker-compose.yml    
 ```
+
+
+## PARTE 2 (B) ##
+
+
+
+## Configuración del Broker MQTT
+
+Creamos un archivo `mosquitto.conf` en `jobmaster-service/` con:
+
+```conf
+listener 1883
+allow_anonymous true
+```
+
+Luego arrancamos Mosquitto:
+
+```bash
+# Desde la carpeta jobmaster-service/
+docker stop test-mosquitto 2>/dev/null || true
+docker rm   test-mosquitto 2>/dev/null || true
+
+docker run -d \
+  --name test-mosquitto \
+  -p 1883:1883 \
+  -v "$(pwd)/mosquitto.conf:/mosquitto/config/mosquitto.conf" \
+  eclipse-mosquitto
+```
+
+Verifica con:
+```bash
+docker ps --filter name=test-mosquitto
+```
+
+---
+
+## Servicio JobMaster
+
+### Variables de entorno
+
+Crea `jobmaster-service/.env`:
+
+```env
+PORT=4000
+BROKER_URL=mqtt://127.0.0.1:1883
+```
+
+### Instalación y arranque
+
+```bash
+cd jobmaster-service
+npm install
+npm start
+```
+
+Deberías ver:
+```
+🔍 Usando BROKER_URL = mqtt://127.0.0.1:1883
+✅ MQTT conectado a mqtt://127.0.0.1:1883
+Suscrito a stocks/validation
+JobMaster listening on port 4000
+```
+
+---
+
+## Pruebas de funcionamiento
+
+1. **Health check**:
+   ```bash
+   curl http://localhost:4000/heartbeat
+   # → { "alive": true }
+   ```
+
+2. **Crear un job**:
+   ```bash
+   curl -v -X POST http://localhost:4000/job \
+     -H "Content-Type: application/json" \
+     -d '{"foo":"bar"}'
+   # → HTTP/1.1 202 Accepted
+   # → { "job_id": "<ID>" }
+   ```
+   Observa en el suscriptor MQTT:
+   ```bash
+docker exec -it test-mosquitto mosquitto_sub -h localhost -t stocks/requests
+   # → { "job_id":"<ID>","data":{"foo":"bar"} }
+   ```
+
+3. **Simular worker**:
+   ```bash
+docker exec -it test-mosquitto mosquitto_pub -h localhost \
+     -t stocks/validation \
+     -m '{"job_id":"<ID>","status":"done","result":{"ok":true}}'
+   ```
+
+4. **Consultar estado de job**:
+   ```bash
+   curl http://localhost:4000/job/<ID>
+   # → { "job_id":"<ID>", "status":"done", "result":{"ok":true} }
+   ```
+
