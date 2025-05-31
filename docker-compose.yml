@@ -2,7 +2,9 @@ version: '3.8'
 
 services:
   api:
-    build: ./api
+    build:
+      context: .              # Usar la raíz (backend-2173) como contexto
+      dockerfile: ./api/Dockerfile  # Especificar dónde está el Dockerfile
     ports:
       - "3000:3000"
     depends_on:

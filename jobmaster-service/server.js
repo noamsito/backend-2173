@@ -1,85 +1,64 @@
-require('dotenv').config();
+// backend-2173/jobmaster-service/server.js
+import express from 'express';
+import dotenv from 'dotenv';
+import { Queue } from 'bullmq'; // Importación directa con destructuring
+import { v4 as uuidv4 } from 'uuid';
 
-const express = require('express');
-const mqtt = require('mqtt');
-const { v4: uuidv4 } = require('uuid');
-
-// Read and log broker URL after dotenv.config()
-const BROKER_URL = process.env.BROKER_URL;
-console.log('🔍 Usando BROKER_URL =', BROKER_URL);
+// Configuración de entorno
+dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 4000;
+const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
+const QUEUE_NAME = 'estimations';
 
-// In-memory store for job states and results
-const jobs = {};
-
-// Connect to MQTT broker
-const client = mqtt.connect(BROKER_URL);
-client.on('connect', () => {
-  console.log('✅ MQTT conectado a', BROKER_URL);
-  // Subscribe to validation topic
-  client.subscribe('stocks/validation', (err) => {
-    if (err) {
-      console.error('Subscription error:', err);
-    } else {
-      console.log('Suscrito a stocks/validation');
-    }
-  });
-});
-client.on('error', (err) => {
-  console.error('❌ Error MQTT:', err);
-});
-
-// Listen for validation messages from workers
-client.on('message', (topic, message) => {
-  if (topic === 'stocks/validation') {
-    try {
-      const { job_id, status, result } = JSON.parse(message.toString());
-      if (jobs[job_id]) {
-        jobs[job_id] = { status, result };
-        console.log(`🔔 Job ${job_id} actualizado:`, status);
-      }
-    } catch (err) {
-      console.error('Invalid validation message:', err);
-    }
-  }
-});
-
+// Middleware JSON
 app.use(express.json());
 
-// Health check endpoint
-app.get('/heartbeat', (req, res) => {
-  res.json({ alive: true });
-});
-
-// Create a new job and publish to workers
-app.post('/job', (req, res) => {
-  const job_id = uuidv4();
-  jobs[job_id] = { status: 'pending' };
-  const payload = { job_id, data: req.body };
-
-  console.log('🔔 Publicando a stocks/requests:', payload);
-
-  client.publish('stocks/requests', JSON.stringify(payload), (err) => {
-    if (err) {
-      console.error('Publish error:', err);
-      return res.status(500).json({ error: 'Failed to queue job' });
-    }
-    res.status(202).json({ job_id });
-  });
-});
-
-// Query job status and result
-app.get('/job/:id', (req, res) => {
-  const job = jobs[req.params.id];
-  if (!job) {
-    return res.status(404).json({ error: 'Job not found' });
+// Solo la cola (QueueScheduler ya no es necesario en versiones recientes)
+const queue = new Queue(QUEUE_NAME, { 
+  connection: { 
+    host: 'localhost',
+    port: 6379
   }
-  res.json({ job_id: req.params.id, ...job });
 });
 
-// Start the service
+// Endpoint de healthcheck
+app.get('/heartbeat', (_req, res) => res.json({ status: 'ok' }));
+
+// Encolar jobs
+app.post('/job', async (req, res) => {
+  const { purchaseId, symbol, quantity } = req.body;
+  if (!purchaseId || !symbol || typeof quantity !== 'number') {
+    return res.status(400).json({ error: 'Faltan campos purchaseId, symbol o quantity válidos' });
+  }
+  try {
+    const jobId = uuidv4();
+    await queue.add(QUEUE_NAME, { purchaseId, symbol, quantity }, { jobId });
+    return res.status(202).json({ jobId, status: 'queued' });
+  } catch (err) {
+    console.error('Error encolando job:', err);
+    return res.status(500).json({ error: 'No se pudo encolar el job' });
+  }
+});
+
+// Consultar estado de job
+app.get('/job/:id', async (req, res) => {
+  const jobId = req.params.id;
+  try {
+    const job = await queue.getJob(jobId);
+    if (!job) return res.status(404).json({ error: 'Job no encontrado' });
+    const state = await job.getState();
+    const result = state === 'completed' ? job.returnvalue : null;
+    return res.json({ jobId, state, result });
+  } catch (err) {
+    console.error('Error obteniendo job:', err);
+    return res.status(500).json({ error: 'No se pudo consultar el job' });
+  }
+});
+
+// Iniciar servidor
 app.listen(PORT, () => {
-  console.log(`JobMaster listening on port ${PORT}`);
+  console.log(`JobMaster listening on http://localhost:${PORT}`);
+  console.log(`→ Redis at ${REDIS_URL}, queue "${QUEUE_NAME}"`);
 });

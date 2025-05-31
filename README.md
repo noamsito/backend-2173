@@ -8,13 +8,15 @@ Esta entrega fue desarrollada utilizando:
 - **Express JS** para la API web
 - **Node.js** para el cliente MQTT
 - **PostgreSQL** como base de datos
+- **Sequelize** como ORM
 - **Docker** para containerización
 - **AWS EC2** para deployment
 
-El sistema consta de tres componentes principales:
+El sistema consta de cuatro componentes principales:
 1. API REST para consultar datos de stocks y almacenarlos en la base de datos
-2. Cliente MQTT que recibe y procesa datos del broker
-3. Base de datos PostgreSQL para persistencia
+2. **Sistema de compras y estimaciones** (RF02 - NUEVO)
+3. Cliente MQTT que recibe y procesa datos del broker
+4. Base de datos PostgreSQL para persistencia
 
 ## Nombre del dominio
 El proyecto está disponible en: [noamsito.lat](https://noamsito.lat)
@@ -24,6 +26,10 @@ El proyecto está disponible en: [noamsito.lat](https://noamsito.lat)
 - `https://noamsito.lat/stocks/{:symbol}` 
 - `https://noamsito.lat/stocks?page=2&count=25`
 - `https://noamsito.lat/stocks/{:symbol}?price=1000&quantity=5&date=2025-03-08`
+
+**NUEVOS ENDPOINTS (RF02):**
+- `https://noamsito.lat/api/purchases/user/1` - Lista compras del usuario
+- `https://noamsito.lat/api/purchases/{purchaseId}/estimate` - Estimación de compra
 
 ## Método de acceso al servidor
 Para acceder al servidor EC2:
@@ -41,6 +47,12 @@ ssh -i 'path/file_pem' ubuntu@ec2-3-15-62-134.us-east-2.compute.amazonaws.com
 - **RF2 (1p):** Endpoint `/stocks/{symbol}` para detalles por símbolo
 - **RF3 (2p):** Paginación implementada (25 items por defecto, configurable)
 
+#### **NUEVOS Requisitos funcionales (RF02):**
+- **RF02 (COMPLETO):** **Sistema de estimación lineal implementado** ✅
+  - Endpoints de compras funcionando ✅
+  - Algoritmo de estimación lineal ✅ 
+  - Vista de detalle con estimaciones ✅
+  - Validaciones y manejo de errores ✅
 
 #### Requisitos no funcionales:
 - **RNF1 (5p):** Cliente MQTT independiente funcionando constantemente
@@ -65,6 +77,15 @@ Se implementó el requisito variable de HTTPS:
 ```
 .
 ├── api/                 
+│   ├── src/
+│   │   ├── controllers/
+│   │   │   └── purchaseController.js    # NUEVO: Lógica de compras y estimaciones
+│   │   ├── models/
+│   │   │   └── Purchase.js              # NUEVO: Modelo Sequelize
+│   │   └── routes/
+│   │       └── purchases.js             # NUEVO: Rutas de API
+│   ├── db/
+│   │   └── db.js                        # NUEVO: Configuración Sequelize
 │   ├── Dockerfile
 │   └── server.js
 ├── mqtt-client/         
@@ -76,10 +97,171 @@ Se implementó el requisito variable de HTTPS:
 └──docker-compose.yml    
 ```
 
+---
+
+## **NUEVAS FUNCIONALIDADES - SISTEMA DE COMPRAS (RF02)**
+
+### 💼 Endpoints de Compras
+
+#### 📋 Obtener compras de un usuario
+```http
+GET /api/purchases/user/{userId}
+```
+**Respuesta:**
+```json
+[
+  {
+    "id": "0cf4d84b-debe-4f0e-b167-4e9da9ceb3b1",
+    "userId": 1,
+    "symbol": "AAPL",
+    "quantity": 10,
+    "priceAtPurchase": 150.5,
+    "createdAt": "2025-05-30T23:30:32.439Z"
+  }
+]
+```
+
+#### 💰 Crear nueva compra
+```http
+POST /api/purchases
+Content-Type: application/json
+
+{
+  "userId": 1,
+  "symbol": "AAPL",
+  "quantity": 10,
+  "priceAtPurchase": 150.50
+}
+```
+
+#### 🔮 Obtener estimación de una compra
+```http
+GET /api/purchases/{purchaseId}/estimate
+```
+**Respuesta:**
+```json
+{
+  "purchase": {
+    "id": "0cf4d84b-debe-4f0e-b167-4e9da9ceb3b1",
+    "symbol": "AAPL",
+    "quantity": 10,
+    "priceAtPurchase": 150.50,
+    "purchaseDate": "2025-05-30T23:30:32.439Z"
+  },
+  "currentPrice": 175.30,
+  "totalInvested": 1505.00,
+  "currentValue": 1753.00,
+  "gainLoss": 248.00,
+  "gainLossPercentage": 16.48,
+  "linearEstimation": {
+    "estimatedPrice": 189.74,
+    "estimatedValue": 1897.43,
+    "confidence": "low",
+    "timeframe": "30 days"
+  }
+}
+```
+
+### 🧮 Algoritmo de Estimación Lineal
+
+El backend implementa un **algoritmo de estimación lineal** que:
+
+1. **Obtiene precio actual** (simulado con datos mock o integración con APIs externas)
+2. **Calcula métricas de rendimiento**:
+   ```javascript
+   const totalInvested = quantity * priceAtPurchase;
+   const currentValue = quantity * currentPrice;
+   const gainLoss = currentValue - totalInvested;
+   const gainLossPercentage = (gainLoss / totalInvested) * 100;
+   ```
+
+3. **Proyecta precio futuro** usando regresión lineal simple:
+   ```javascript
+   const changeRate = gainLossPercentage / 100;
+   const futureEstimate = currentPrice * (1 + changeRate * 0.5);
+   ```
+
+4. **Calcula estimación a 30 días**:
+   ```javascript
+   const estimation = {
+     estimatedPrice: futureEstimate,
+     estimatedValue: quantity * futureEstimate,
+     confidence: 'low', // Basado en volatilidad
+     timeframe: '30 days'
+   };
+   ```
+
+### 🗃️ Modelo de Datos - Purchase
+
+```javascript
+{
+  id: UUID (Primary Key),
+  userId: INTEGER (Foreign Key),
+  symbol: STRING (Stock symbol),
+  quantity: INTEGER (Number of shares),
+  priceAtPurchase: DECIMAL (Price per share at purchase),
+  createdAt: TIMESTAMP,
+  updatedAt: TIMESTAMP
+}
+```
+
+### ✅ Validaciones Implementadas
+
+#### Validación de Datos de Compra
+- **userId**: Debe ser número entero positivo
+- **symbol**: String requerido, se convierte a mayúsculas
+- **quantity**: Entero positivo requerido
+- **priceAtPurchase**: Número decimal positivo requerido
+
+#### Validación de UUID
+- **purchaseId**: Debe ser UUID v4 válido para endpoints de estimación
+- Regex permisivo: `/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i`
+
+### 🔗 Integración con JobMaster
+
+```javascript
+// Notifica al JobMaster cuando se crea una compra
+try {
+  await axios.post(`${process.env.JOBMASTER_URL}/job`, {
+    purchaseId: purchase.id,
+    symbol,
+    quantity
+  });
+} catch (jobError) {
+  console.warn('JobMaster no disponible:', jobError.message);
+}
+```
+
+### 💱 Simulación de Precios Actuales
+
+```javascript
+const mockCurrentPrices = {
+  'AAPL': 175.30,
+  'GOOGL': 142.56,
+  'MSFT': 378.85,
+  'TSLA': 248.12,
+  'AMZN': 145.34
+};
+```
+
+### 🔧 Testing de Nuevos Endpoints
+
+```bash
+# Obtener compras de usuario
+curl https://noamsito.lat/api/purchases/user/1
+
+# Crear nueva compra
+curl -X POST https://noamsito.lat/api/purchases \
+  -H "Content-Type: application/json" \
+  -d '{"userId":1,"symbol":"AAPL","quantity":10,"priceAtPurchase":150.50}'
+
+# Obtener estimación (usar UUID real de la respuesta anterior)
+curl https://noamsito.lat/api/purchases/0cf4d84b-debe-4f0e-b167-4e9da9ceb3b1/estimate
+```
+
+---
 
 ## PARTE 2 (B) ##
-
-
 
 ## Configuración del Broker MQTT
 

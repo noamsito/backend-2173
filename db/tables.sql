@@ -53,3 +53,20 @@ CREATE TABLE IF NOT EXISTS events (
     details JSONB NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- ACTUALIZAR: purchases para que sea compatible con users.id (INTEGER)
+CREATE TABLE IF NOT EXISTS purchases (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id INTEGER NOT NULL REFERENCES users(id),  -- Cambiar a INTEGER para coincidir con users.id
+  symbol VARCHAR(20) NOT NULL,
+  quantity INTEGER NOT NULL,
+  price_at_purchase FLOAT NOT NULL,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Database connection settings
+\set DB_NAME 'stock_data'
+\set DB_USER 'postgres'
+\set DB_PASSWORD 'tu_password'
+\set DB_HOST 'localhost'
+\set DB_PORT '5432'

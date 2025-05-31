@@ -2,20 +2,21 @@ import express from 'express';
 import cors from 'cors';
 import pg from 'pg';
 import dotenv from 'dotenv';
+import purchaseRoutes from './src/routes/purchases.js';
 import { auth } from 'express-oauth2-jwt-bearer';
 import { v4 as uuidv4 } from 'uuid';
 import { createSyncUserMiddleware } from './auth-integration.js';
 import mqtt from 'mqtt';
-import axios from 'axios'; // Añade esta línea
+import axios from 'axios';
+import sequelize from './db/db.js';
 
 const Pool = pg.Pool;
-
 const app = express();
 const port = 3000;
 
 dotenv.config();
 
-// Configuración de la base de datos - MOVER ESTO ANTES DE USAR pool
+// Configuración de la base de datos
 const pool = new Pool({
     user: process.env.DB_USER || 'postgres',
     host: process.env.DB_HOST || 'localhost',
@@ -24,27 +25,37 @@ const pool = new Pool({
     password: process.env.DB_PASSWORD || 'password',
 });
 
-// Crear middleware de sincronización de usuarios - AHORA pool YA ESTÁ DEFINIDO
+// Crear middleware de sincronización de usuarios
 const syncUser = createSyncUserMiddleware(pool);
 const GROUP_ID = process.env.GROUP_ID || "1";
 
-// Configurar middleware de autenticación Auth0
+// CORREGIR: Configurar middleware de autenticación Auth0 con las variables correctas
 const checkJwt = auth({
-    audience: 'https://stockmarket-api/',
-    issuerBaseURL: 'https://dev-ouxdigl1l6bn6n3r.us.auth0.com/',
+    audience: process.env.AUTH0_AUDIENCE || 'https://stockmarket-api/',
+    issuerBaseURL: `https://${process.env.AUTH0_DOMAIN}` || 'https://dev-ouxdigl1l6bn6n3r.us.auth0.com/',
     tokenSigningAlg: 'RS256'
 });
 
-
+// CORS configuration
 app.use(cors({
     origin: ['http://localhost:80', 'http://localhost', 'http://localhost:5173', 
         process.env.FRONTEND_URL, 'http://antonioescobar.lat',
         'http://frontend-grupo1-iic2173.s3-website-us-east-1.amazonaws.com/',
         'http://frontend-grupo1-iic2173.s3-website-us-east-1.amazonaws.com'].filter(Boolean),
-    credentials: true
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
 }));
+
+// Middleware de debugging
+app.use('/api/purchases', (req, res, next) => {
+    console.log(`🔍 ${req.method} ${req.path} - Origin: ${req.get('Origin')}`);
+    next();
+});
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use('/api/purchases', purchaseRoutes);
 
 
 const client = await pool.connect();
