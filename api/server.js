@@ -1107,6 +1107,58 @@ app.get('/debug/token', checkJwt, async (req, res) => {
     }
 });
 
+// Endpoint de estadísticas de compras (agregar antes de app.listen())
+app.get('/api/purchases/stats', async (req, res) => {
+    try {
+        // Obtener total de compras
+        const totalQuery = `SELECT COUNT(*) as total FROM purchase_requests`;
+        const totalResult = await client.query(totalQuery);
+        
+        // Obtener estadísticas por status
+        const statusQuery = `
+            SELECT 
+                status,
+                COUNT(*) as count
+            FROM purchase_requests 
+            GROUP BY status
+        `;
+        const statusResult = await client.query(statusQuery);
+        
+        // Preparar respuesta
+        const stats = {
+            total: parseInt(totalResult.rows[0]?.total || 0),
+            processed: 0,
+            pending: 0,
+            failed: 0
+        };
+        
+        // Mapear resultados por status
+        statusResult.rows.forEach(row => {
+            const count = parseInt(row.count);
+            switch(row.status?.toUpperCase()) {
+                case 'ACCEPTED':
+                    stats.processed = count;
+                    break;
+                case 'PENDING':
+                    stats.pending = count;
+                    break;
+                case 'REJECTED':
+                case 'ERROR':
+                    stats.failed = count;
+                    break;
+            }
+        });
+        
+        res.json(stats);
+    } catch (error) {
+        console.error('Error obteniendo estadísticas de compras:', error);
+        res.status(500).json({ 
+            error: 'Error interno del servidor',
+            details: error.message 
+        });
+    }
+});
+
 app.listen(port, '0.0.0.0',() => {
     console.log(`Servidor ejecutándose en http://localhost:${port}`);
 });

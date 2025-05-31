@@ -1,6 +1,8 @@
 // src/controllers/purchaseController.js
 import axios from 'axios';
+import amqp from 'amqplib'; // ← AGREGAR ESTA LÍNEA
 import Purchase from '../models/Purchase.js';
+import sequelize from 'sequelize';
 
 // Función helper para validar si es un número entero válido
 const isValidInteger = (value) => {
@@ -68,14 +70,33 @@ export const createPurchase = async (req, res) => {
       priceAtPurchase
     });
 
+
     try {
-      await axios.post(`${process.env.JOBMASTER_URL}/job`, {
+      const jobData = {
+        type: 'purchase',
         purchaseId: purchase.id,
-        symbol,
-        quantity
-      });
-    } catch (jobError) {
-      console.warn('JobMaster no disponible:', jobError.message);
+        symbol: purchase.symbol,
+        quantity: purchase.quantity,
+        userId: purchase.userId,
+        priceAtPurchase: purchase.priceAtPurchase
+      };
+
+      const connection = await amqp.connect(process.env.RABBITMQ_URL || 'amqp://rabbitmq:5672');
+      const channel = await connection.createChannel();
+      await channel.assertQueue('purchase_processing', { durable: true });
+      
+      channel.sendToQueue(
+        'purchase_processing',
+        Buffer.from(JSON.stringify(jobData)),
+        { persistent: true }
+      );
+      
+      await channel.close();
+      await connection.close();
+      
+      console.log(`✅ Enviado a RabbitMQ: ${purchase.id}`);
+    } catch (mqError) {
+      console.warn('RabbitMQ no disponible:', mqError.message);
     }
 
     res.status(201).json(purchase);
@@ -156,5 +177,42 @@ export const getEstimation = async (req, res) => {
   } catch (error) {
     console.error('❌ Error al calcular estimación:', error);
     res.status(500).json({ error: 'Error interno del servidor' });
+  }
+};
+
+// AGREGAR ESTA NUEVA FUNCIÓN AL FINAL
+export const getPurchaseStats = async (req, res) => {
+  try {
+    const totalPurchases = await Purchase.count();
+    
+    const statusCounts = await Purchase.findAll({
+      attributes: [
+        [sequelize.fn('COUNT', sequelize.col('id')), 'count'],
+        'status'
+      ],
+      group: ['status'],
+      raw: true
+    });
+
+    const stats = {
+      total: totalPurchases,
+      processed: 0,
+      pending: 0,
+      failed: 0
+    };
+
+    statusCounts.forEach(item => {
+      const status = item.status || 'pending';
+      stats[status] = parseInt(item.count);
+    });
+
+    res.json(stats);
+    
+  } catch (error) {
+    console.error('Error obteniendo estadísticas:', error);
+    res.status(500).json({ 
+      error: 'Error obteniendo estadísticas de compras',
+      details: error.message 
+    });
   }
 };
