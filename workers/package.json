@@ -1,0 +1,22 @@
+{
+  "name": "stockmarket-workers",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Workers para procesamiento asíncrono de compras y estimaciones",
+  "main": "basic_worker.js",
+  "scripts": {
+    "start": "node basic_worker.js",
+    "dev": "node --watch basic_worker.js",
+    "monitor": "node monitor.js",
+    "test-queue": "node test_queue.js"
+  },
+  "dependencies": {
+    "amqplib": "^0.10.3",
+    "axios": "^1.6.0",
+    "dotenv": "^16.3.1",
+    "uuid": "^9.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

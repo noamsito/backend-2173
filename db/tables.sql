@@ -61,8 +61,27 @@ CREATE TABLE IF NOT EXISTS purchases (
   symbol VARCHAR(20) NOT NULL,
   quantity INTEGER NOT NULL,
   price_at_purchase FLOAT NOT NULL,
+  status VARCHAR(20) DEFAULT 'PENDING',  -- AGREGAR ESTA LÍNEA
   created_at TIMESTAMP DEFAULT NOW()
 );
+
+-- AGREGAR AL FINAL: Columna status a purchases también (para compatibilidad con Sequelize)
+ALTER TABLE purchases ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'PENDING';
+
+-- Crear índice para mejorar consultas por status en purchases
+CREATE INDEX IF NOT EXISTS idx_purchases_status ON purchases(status);
+
+-- Actualizar registros existentes que no tengan status en purchases
+UPDATE purchases SET status = 'PENDING' WHERE status IS NULL;
+
+-- AGREGAR AL FINAL: Columna status si no existe (para compatibilidad con el monitor)
+ALTER TABLE purchase_requests ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'PENDING';
+
+-- Crear índice para mejorar consultas por status
+CREATE INDEX IF NOT EXISTS idx_purchase_requests_status ON purchase_requests(status);
+
+-- Actualizar registros existentes que no tengan status
+UPDATE purchase_requests SET status = 'PENDING' WHERE status IS NULL;
 
 -- Database connection settings
 \set DB_NAME 'stock_data'
