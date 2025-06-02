@@ -14,7 +14,48 @@ const Pool = pg.Pool;
 const app = express();
 const port = 3000;
 
+
 dotenv.config();
+
+const WORKERS_API_URL = process.env.WORKERS_API_URL || 'http://localhost:3000';
+
+// Función para triggerar estimación después de compra exitosa
+async function triggerEstimationCalculation(userId, purchaseData) {
+    try {
+        console.log(`Triggerando estimación para usuario ${userId}, acción: ${purchaseData.symbol}`);
+        
+        const response = await fetch(`${WORKERS_API_URL}/job`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                userId,
+                stocksPurchased: [
+                    {
+                        symbol: purchaseData.symbol,
+                        quantity: purchaseData.quantity,
+                        purchasePrice: purchaseData.price
+                    }
+                ]
+            })
+        });
+        
+        const result = await response.json();
+        
+        if (response.ok) {
+            console.log(`Estimación triggereada para usuario ${userId}, jobId: ${result.jobId}`);
+            return result.jobId;
+        } else {
+            console.error('Error del JobMaster:', result);
+            return null;
+        }
+    } catch (error) {
+        console.error('Error triggering estimation:', error.message);
+        return null;
+    }
+}
+
 
 // Configuración de la base de datos
 const pool = new Pool({
@@ -823,7 +864,6 @@ app.post('/purchase-validation', async (req, res) => {
             price: purchase.price
         });
         
-        // Si la compra fue aceptada, descontar de la billetera
         if (validation.status === 'ACCEPTED') {
             await client.query(`
                 UPDATE wallet 
@@ -833,33 +873,30 @@ app.post('/purchase-validation', async (req, res) => {
             `, [totalCost, purchase.user_id]);
             
             console.log(`Compra aceptada: descontado $${totalCost} de la wallet del usuario ${purchase.user_id}`);
-        } 
-        // Si la compra fue rechazada, devolver la cantidad reservada
-        else if (validation.status === 'REJECTED' || validation.status === 'error') {
-            // Obtener la entrada más reciente de la acción
-            const stockQuery = `
-                SELECT id FROM stocks 
-                WHERE symbol = $1 
-                ORDER BY timestamp DESC 
-                LIMIT 1
-            `;
             
-            const stockResult = await client.query(stockQuery, [purchase.symbol]);
+            // 🆕 NUEVO: Triggerar estimación
+            const jobId = await triggerEstimationCalculation(purchase.user_id, {
+                symbol: purchase.symbol,
+                quantity: purchase.quantity,
+                price: purchase.price
+            });
             
-            if (stockResult.rows.length > 0) {
-                await client.query(`
-                    UPDATE stocks 
-                    SET quantity = quantity + $1 
-                    WHERE id = $2
-                `, [purchase.quantity, stockResult.rows[0].id]);
-                
-                console.log(`Compra rechazada: devueltas ${purchase.quantity} acciones de ${purchase.symbol} al inventario`);
+            if (jobId) {
+                // Guardar jobId en la base de datos para seguimiento
+                try {
+                    await client.query(`
+                        UPDATE purchase_requests 
+                        SET estimation_job_id = $1 
+                        WHERE request_id = $2
+                    `, [jobId, validation.request_id]);
+                    console.log(`Job ID ${jobId} guardado para request ${validation.request_id}`);
+                } catch (updateError) {
+                    console.error('Error guardando job ID:', updateError);
+                }
             }
         }
-        
-        res.json({ status: "success" });
     } catch (error) {
-        console.error("Error procesando validación de compra:", error);
+        console.error("Error procesando validación:", error);
         res.status(500).json({ error: "Error interno del servidor" });
     }
 });
@@ -1156,6 +1193,103 @@ app.get('/api/purchases/stats', async (req, res) => {
             error: 'Error interno del servidor',
             details: error.message 
         });
+    }
+});
+
+// AGREGAR ANTES DE: app.listen(port, '0.0.0.0',() => {
+// (línea ~720)
+
+// Endpoint para consultar estimaciones
+app.get('/estimation/:jobId', async (req, res) => {
+    try {
+        const { jobId } = req.params;
+        
+        console.log(`Consultando estimación para job: ${jobId}`);
+        
+        const response = await fetch(`${WORKERS_API_URL}/job/${jobId}`);
+        const result = await response.json();
+        
+        if (response.ok) {
+            res.json(result);
+        } else {
+            res.status(response.status).json(result);
+        }
+    } catch (error) {
+        console.error('Error getting estimation:', error);
+        res.status(500).json({ error: 'Error obteniendo estimación' });
+    }
+});
+
+// Endpoint para verificar estado del JobMaster (RF04)
+app.get('/workers/health', async (req, res) => {
+    try {
+        const response = await fetch(`${WORKERS_API_URL}/heartbeat`, {
+            timeout: 5000
+        });
+        const result = await response.json();
+        
+        res.json({
+            workers_available: response.ok && result.healthy === true,
+            status: result,
+            timestamp: new Date().toISOString()
+        });
+    } catch (error) {
+        console.error('Error checking workers health:', error);
+        res.json({
+            workers_available: false,
+            error: 'Workers no disponibles',
+            timestamp: new Date().toISOString()
+        });
+    }
+});
+
+// Endpoint para obtener estimación de una compra específica
+app.get('/purchase/:requestId/estimation', checkJwt, syncUser, async (req, res) => {
+    try {
+        const { requestId } = req.params;
+        
+        // Buscar el job_id asociado a esta compra
+        const purchaseQuery = `
+            SELECT estimation_job_id, user_id, symbol, quantity, price 
+            FROM purchase_requests 
+            WHERE request_id = $1 AND user_id = $2
+        `;
+        
+        const purchaseResult = await client.query(purchaseQuery, [requestId, req.userId]);
+        
+        if (purchaseResult.rows.length === 0) {
+            return res.status(404).json({ error: 'Compra no encontrada' });
+        }
+        
+        const purchase = purchaseResult.rows[0];
+        
+        if (!purchase.estimation_job_id) {
+            return res.json({
+                status: 'no_estimation',
+                message: 'Estimación no generada para esta compra'
+            });
+        }
+        
+        // Consultar el estado de la estimación
+        const response = await fetch(`${WORKERS_API_URL}/job/${purchase.estimation_job_id}`);
+        const estimationResult = await response.json();
+        
+        if (response.ok) {
+            res.json({
+                ...estimationResult,
+                purchase_info: {
+                    symbol: purchase.symbol,
+                    quantity: purchase.quantity,
+                    price: purchase.price
+                }
+            });
+        } else {
+            res.status(response.status).json(estimationResult);
+        }
+        
+    } catch (error) {
+        console.error('Error getting purchase estimation:', error);
+        res.status(500).json({ error: 'Error obteniendo estimación de compra' });
     }
 });
 
