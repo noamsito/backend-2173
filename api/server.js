@@ -6,6 +6,7 @@ import purchaseRoutes from './src/routes/purchases.js';
 import { auth } from 'express-oauth2-jwt-bearer';
 import { v4 as uuidv4 } from 'uuid';
 import { createSyncUserMiddleware } from './auth-integration.js';
+import { WebPayService } from './src/services/webpayService.js';
 import mqtt from 'mqtt';
 import axios from 'axios';
 import sequelize from './db/db.js';
@@ -579,7 +580,7 @@ app.get('/wallet/balance', checkJwt, syncUser, async (req, res) => {
 // ENDPOINTS DE COMPRA DE ACCIONES ===========================================
 
 // Comprar acciones (versión mejorada)
-app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
+app.post('/stocks/buy/webpay/init', checkJwt, syncUser, async (req, res) => {
     try {
         const { symbol, quantity } = req.body;
         
@@ -587,17 +588,8 @@ app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
             return res.status(400).json({ error: "Solicitud de compra inválida" });
         }
         
-        console.log(`Procesando solicitud de compra: ${quantity} acciones de ${symbol}`);
-        
-        
-        // Obtener precio actual y disponibilidad de la acción
-        const stockQuery = `
-            SELECT * FROM stocks 
-            WHERE symbol = $1 
-            ORDER BY timestamp DESC 
-            LIMIT 1
-        `;
-        
+        // Verificaciones existentes (stock, saldo, etc.)
+        const stockQuery = `SELECT * FROM stocks WHERE symbol = $1 ORDER BY timestamp DESC LIMIT 1`;
         const stockResult = await client.query(stockQuery, [symbol]);
         
         if (stockResult.rows.length === 0) {
@@ -605,89 +597,295 @@ app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
         }
         
         const stock = stockResult.rows[0];
-        
-        if (stock.quantity < quantity) {
-            return res.status(400).json({ error: "No hay suficientes acciones disponibles" });
-        }
-        
         const totalCost = stock.price * quantity;
         
-        // Verificar saldo en billetera
-        const walletQuery = `
-            SELECT balance FROM wallet 
-            WHERE user_id = $1
-        `;
-        
+        // Verificar saldo
+        const walletQuery = `SELECT balance FROM wallet WHERE user_id = $1`;
         const walletResult = await client.query(walletQuery, [req.userId]);
         
         if (walletResult.rows.length === 0 || walletResult.rows[0].balance < totalCost) {
             return res.status(400).json({ error: "Fondos insuficientes" });
         }
         
-        // Generar UUID para la solicitud
+        // Generar IDs únicos
         const requestId = uuidv4();
+        const sessionId = uuidv4();
         
-        // Crear solicitud de compra en la base de datos
+        // Crear transacción WebPay
+        const returnUrl = `${process.env.FRONTEND_URL || 'http://localhost'}/webpay/return`;
+        
+        const webpayResponse = await WebPayService.createTransaction(
+            requestId,           // buy_order
+            sessionId,          // session_id  
+            Math.round(totalCost), // amount (sin decimales)
+            returnUrl           // return_url
+        );
+        
+        if (!webpayResponse.success) {
+            return res.status(500).json({ error: "Error iniciando pago WebPay" });
+        }
+        
+        // Guardar solicitud pendiente de WebPay
         const purchaseQuery = `
             INSERT INTO purchase_requests 
-            (request_id, user_id, symbol, quantity, price, status) 
-            VALUES ($1, $2, $3, $4, $5, 'PENDING')
+            (request_id, user_id, symbol, quantity, price, status, webpay_token, session_id) 
+            VALUES ($1, $2, $3, $4, $5, 'WEBPAY_PENDING', $6, $7)
             RETURNING id
         `;
         
         await client.query(purchaseQuery, [
-            requestId, 
-            req.userId,
-            symbol, 
-            quantity, 
-            stock.price
+            requestId, req.userId, symbol, quantity, stock.price, 
+            webpayResponse.token, sessionId
         ]);
         
-        console.log(`Solicitud de compra registrada: ID ${requestId}`);
+        res.json({
+            success: true,
+            webpay_url: webpayResponse.url,
+            webpay_token: webpayResponse.token,
+            request_id: requestId
+        });
         
-        // Reservar temporalmente la cantidad de acciones
+    } catch (error) {
+        console.error("Error iniciando WebPay:", error);
+        res.status(500).json({ error: "Error interno del servidor" });
+    }
+});
+
+// NUEVO ENDPOINT: Confirmar pago WebPay
+app.post('/stocks/buy/webpay/confirm', async (req, res) => {
+    try {
+        const { token_ws } = req.body;
+        
+        if (!token_ws) {
+            return res.status(400).json({ 
+                error: "Token WebPay requerido",
+                userMessage: "Error en el proceso de pago. Token no encontrado."
+            });
+        }
+        
+        console.log(`Confirmando pago WebPay con token: ${token_ws}`);
+        
+        const webpayResponse = await WebPayService.confirmTransaction(token_ws);
+        const result = WebPayService.getTransactionResult(webpayResponse);
+        
+        console.log(`Resultado WebPay: ${result.type} - ${result.message}`);
+        
+        const buyOrder = webpayResponse.success ? webpayResponse.buy_order : null;
+        let purchase = null;
+        
+        if (buyOrder) {
+            const findQuery = `
+                SELECT * FROM purchase_requests 
+                WHERE request_id = $1 AND status = 'WEBPAY_PENDING'
+            `;
+            
+            const findResult = await client.query(findQuery, [buyOrder]);
+            
+            if (findResult.rows.length > 0) {
+                purchase = findResult.rows[0];
+            }
+        }
+        
+        if (!purchase) {
+            const findByTokenQuery = `
+                SELECT * FROM purchase_requests 
+                WHERE webpay_token = $1 AND status = 'WEBPAY_PENDING'
+            `;
+            
+            const findResult = await client.query(findByTokenQuery, [token_ws]);
+            
+            if (findResult.rows.length > 0) {
+                purchase = findResult.rows[0];
+                console.log(`Compra encontrada por token: ${purchase.request_id}`);
+            }
+        }
+        
+        if (!purchase) {
+            return res.status(404).json({ 
+                error: "Solicitud no encontrada",
+                userMessage: "No se pudo encontrar la solicitud de compra asociada."
+            });
+        }
+        
+        let needsStockRestore = false;
+        
+        switch (result.type) {
+            case 'APPROVED':
+                console.log(`✅ Pago APROBADO para ${purchase.request_id}`);
+                
+                const totalCost = purchase.quantity * purchase.price;
+                await client.query(`
+                    UPDATE wallet 
+                    SET balance = balance - $1, updated_at = CURRENT_TIMESTAMP
+                    WHERE user_id = $2
+                `, [totalCost, purchase.user_id]);
+                
+                const mqttMessage = {
+                    request_id: purchase.request_id,
+                    group_id: GROUP_ID,
+                    quantity: purchase.quantity,
+                    symbol: purchase.symbol,
+                    operation: "BUY",
+                    deposit_token: token_ws
+                };
+                
+                try {
+                    await axios.post('http://mqtt-client:3000/publish', {
+                        topic: 'stocks/requests',
+                        message: mqttMessage
+                    });
+                    console.log(`Solicitud enviada a MQTT: ${purchase.request_id}`);
+                } catch (mqttError) {
+                    console.error(`Error enviando a MQTT: ${mqttError.message}`);
+                }
+                
+                break;
+                
+            case 'REJECTED':
+                console.log(`❌ Pago RECHAZADO para ${purchase.request_id}: ${result.message}`);
+                needsStockRestore = true;
+                break;
+                
+            case 'ABANDONED':
+                console.log(`🚪 Pago ABANDONADO para ${purchase.request_id}`);
+                needsStockRestore = true;
+                break;
+                
+            case 'UNCERTAIN':
+                console.log(`❓ Pago INCIERTO para ${purchase.request_id}: ${result.message}`);
+                needsStockRestore = true;
+                break;
+                
+            default:
+                console.log(`⚠️ Estado desconocido para ${purchase.request_id}`);
+                needsStockRestore = true;
+                break;
+        }
+        
+        if (needsStockRestore) {
+            try {
+                await client.query(`
+                    UPDATE stocks 
+                    SET quantity = quantity + $1 
+                    WHERE symbol = $2 AND id = (
+                        SELECT id FROM stocks 
+                        WHERE symbol = $2 
+                        ORDER BY timestamp DESC 
+                        LIMIT 1
+                    )
+                `, [purchase.quantity, purchase.symbol]);
+                
+                console.log(`Stock restaurado: +${purchase.quantity} ${purchase.symbol}`);
+            } catch (stockError) {
+                console.error(`Error restaurando stock: ${stockError.message}`);
+            }
+        }
+        
+        await client.query(`
+            UPDATE purchase_requests 
+            SET status = $1, 
+                reason = $2, 
+                webpay_response = $3, 
+                updated_at = CURRENT_TIMESTAMP
+            WHERE request_id = $4
+        `, [
+            result.status, 
+            result.message, 
+            JSON.stringify(webpayResponse), 
+            purchase.request_id
+        ]);
+        
+        await logEvent('WEBPAY_RESULT', {
+            request_id: purchase.request_id,
+            type: result.type,
+            status: result.status,
+            message: result.message,
+            symbol: purchase.symbol,
+            quantity: purchase.quantity,
+            amount: webpayResponse.amount || purchase.quantity * purchase.price,
+            user_id: purchase.user_id,
+            webpay_details: result.details
+        });
+        
+        res.json({
+            success: result.type === 'APPROVED',
+            type: result.type,
+            status: result.status,
+            message: result.message,
+            userMessage: result.userMessage,
+            request_id: purchase.request_id,
+            details: result.details,
+            webpay_response: webpayResponse
+        });
+        
+    } catch (error) {
+        console.error("Error confirmando WebPay:", error);
+        res.status(500).json({ 
+            error: "Error interno del servidor",
+            userMessage: "Ocurrió un error procesando tu pago. Por favor, contacta soporte."
+        });
+    }
+});
+
+// NUEVO ENDPOINT: Cancelar compra
+app.post('/stocks/buy/webpay/cancel', checkJwt, syncUser, async (req, res) => {
+    try {
+        const { request_id } = req.body;
+        
+        if (!request_id) {
+            return res.status(400).json({ error: "request_id requerido" });
+        }
+        
+        const findQuery = `
+            SELECT * FROM purchase_requests 
+            WHERE request_id = $1 AND user_id = $2 AND status = 'WEBPAY_PENDING'
+        `;
+        
+        const findResult = await client.query(findQuery, [request_id, req.userId]);
+        
+        if (findResult.rows.length === 0) {
+            return res.status(404).json({ error: "Solicitud no encontrada" });
+        }
+        
+        const purchase = findResult.rows[0];
+        
         await client.query(`
             UPDATE stocks 
-            SET quantity = quantity - $1 
-            WHERE id = $2
-        `, [quantity, stock.id]);
+            SET quantity = quantity + $1 
+            WHERE symbol = $2 AND id = (
+                SELECT id FROM stocks 
+                WHERE symbol = $2 
+                ORDER BY timestamp DESC 
+                LIMIT 1
+            )
+        `, [purchase.quantity, purchase.symbol]);
         
-        console.log(`Reservadas ${quantity} acciones de ${symbol} temporalmente`);
+        await client.query(`
+            UPDATE purchase_requests 
+            SET status = 'CANCELLED_BY_USER', 
+                reason = 'Usuario canceló el pago antes de completar WebPay', 
+                updated_at = CURRENT_TIMESTAMP
+            WHERE request_id = $1
+        `, [request_id]);
         
-        // Crear el mensaje para el broker MQTT
-        const message = {
-            request_id: requestId,
-            group_id: GROUP_ID,
-            quantity: quantity,
-            symbol: symbol,
-            operation: "BUY"
-        };
-        
-        // Publicar solicitud de compra al broker MQTT
-        await axios.post('http://mqtt-client:3000/publish', {
-            topic: 'stocks/requests',
-            message: message
-        });
-        
-        console.log(`Solicitud enviada al broker MQTT: ${requestId}`);
-        
-        // Registrar evento
-        await logEvent('PURCHASE_REQUEST', {
-            request_id: requestId,
+        await logEvent('WEBPAY_CANCELLED', {
+            request_id: request_id,
             user_id: req.userId,
-            symbol: symbol,
-            quantity: quantity,
-            price: stock.price,
-            group_id: GROUP_ID
+            symbol: purchase.symbol,
+            quantity: purchase.quantity,
+            reason: 'Cancelled by user'
         });
         
-        res.json({ 
-            status: "success", 
-            message: "Solicitud de compra enviada", 
-            request_id: requestId 
+        console.log(`Usuario canceló compra: ${request_id}`);
+        
+        res.json({
+            success: true,
+            message: "Compra cancelada exitosamente",
+            request_id: request_id
         });
+        
     } catch (error) {
-        console.error("Error procesando compra:", error);
+        console.error("Error cancelando compra:", error);
         res.status(500).json({ error: "Error interno del servidor" });
     }
 });
