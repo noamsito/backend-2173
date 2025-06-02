@@ -10,6 +10,7 @@ const pool = new Pool({
   password: process.env.DB_PASSWORD || 'password',
 });
 
+
 export class WebpayController {
   /**
    * Iniciar transacción de pago

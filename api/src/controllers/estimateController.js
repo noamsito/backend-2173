@@ -5,4 +5,5 @@ const router = express.Router();
 router.post('/', createPurchase);
 router.get('/:id/estimate', getEstimation);
 
+
 module.exports = router;

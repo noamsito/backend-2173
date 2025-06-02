@@ -7,6 +7,7 @@ BEGIN
 END
 $$;
 
+
 \c stock_data;
 
 CREATE TABLE IF NOT EXISTS stocks (

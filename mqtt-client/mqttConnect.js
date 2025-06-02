@@ -16,6 +16,7 @@ const options = {
     reconnectPeriod: 1000, // Reconexión cada 1 segundo si se pierde la conexión
 };
 
+
 const UPDATES_TOPIC = "stocks/updates";
 const REQUESTS_TOPIC = "stocks/requests";
 const VALIDATION_TOPIC = 'stocks/validation';

@@ -147,6 +147,7 @@ export function createSyncUserMiddleware(pool) {
             });
           }
           
+          
           console.log("Creando usuario con:", { auth0Id, email: userEmail, name: userName || "Usuario" });
           
           // 5. Crear el usuario en nuestra base de datos

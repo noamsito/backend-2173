@@ -15,6 +15,7 @@ const isValidUUID = (value) => {
   return uuidRegex.test(value);
 };
 
+
 // GET /api/purchases/user/:userId - Obtener compras de un usuario
 export const getUserPurchases = async (req, res) => {
   try {

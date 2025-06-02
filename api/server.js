@@ -696,6 +696,7 @@ app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
         });
         // Fin integración webpay
 
+        
         /*
         Código que estaba antes de la integración de webpay. Se dejó por si acaso.
 

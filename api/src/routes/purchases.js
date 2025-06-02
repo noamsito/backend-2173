@@ -16,4 +16,5 @@ router.get('/:purchaseId/estimate', getEstimation);
 // 🆕 NUEVA RUTA - Estadísticas de compras
 //router.get('/stats', getPurchaseStats);
 
+
 export default router;
