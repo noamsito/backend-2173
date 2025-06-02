@@ -91,11 +91,11 @@ export class WebpayController {
         try {
           const client = await pool.connect();
           
-          // Buscar transacciones pendientes recientes (último minuto)
+          // Buscar transacciones pendientes por session_id o user reciente
           const recentTransactionQuery = `
             SELECT * FROM webpay_transactions 
             WHERE status = 'pending' 
-            AND created_at > NOW() - INTERVAL '1 minute'
+            AND created_at > NOW() - INTERVAL '5 minutes'
             ORDER BY created_at DESC 
             LIMIT 1
           `;
@@ -111,24 +111,6 @@ export class WebpayController {
               SET status = 'cancelled', updated_at = NOW() 
               WHERE id = $1
             `, [transaction.id]);
-            
-            // Enviar validación de cancelación al broker
-            const validationMessage = {
-              request_id: transaction.request_id,
-              timestamp: new Date().toISOString(),
-              status: "REJECTED",
-              reason: "Pago cancelado por el usuario"
-            };
-            
-            try {
-              await axios.post('http://mqtt-client:3000/publish', {
-                topic: 'stocks/validation',
-                message: validationMessage
-              });
-              console.log(`📡 Cancelación enviada por stocks/validation: ${transaction.request_id}`);
-            } catch (mqttError) {
-              console.error('❌ Error enviando cancelación al broker MQTT:', mqttError);
-            }
             
             console.log(`❌ Transacción cancelada: ${transaction.request_id}`);
           }
@@ -158,7 +140,7 @@ export class WebpayController {
         if (transactionResult.rows.length === 0) {
           console.log(`❌ Token no encontrado: ${token_ws}`);
           const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:80';
-          return res.redirect(`${frontendUrl}/stocks/cancelado?status=error&message=Token de transacción no encontrado`);
+          return res.redirect(`${frontendUrl}/stocks?status=error&message=Token de transacción no encontrado`);
         }
         
         const transaction = transactionResult.rows[0];
@@ -177,7 +159,7 @@ export class WebpayController {
           `, [token_ws]);
           
           const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:80';
-          return res.redirect(`${frontendUrl}/stocks/${transaction.symbol}?status=error&message=Error al confirmar el pago&request_id=${transaction.request_id}`);
+          return res.redirect(`${frontendUrl}/stocks/${transaction.symbol}?status=failed&message=Error al confirmar el pago&request_id=${transaction.request_id}`);
         }
         
         const paymentData = confirmResult.data;
@@ -233,7 +215,8 @@ export class WebpayController {
       
       // En cualquier error, tratar como cancelación
       const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:80';
-      return res.redirect(`${frontendUrl}/stocks/cancelado?status=error&message=Error procesando el pago - transacción cancelada`);
+      const symbol = req.body?.symbol || req.query?.symbol || 'unknown';
+      return res.redirect(`${frontendUrl}/stocks/${symbol}?status=error&message=Error procesando el pago - transacción cancelada`);
     }
   }
 

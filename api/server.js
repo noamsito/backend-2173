@@ -799,117 +799,101 @@ app.get('/debug/check-duplicates', async (req, res) => {
     }
 });
 
-// Validación de compra (para las respuestas del broker)
+
+// REEMPLAZAR TODO EL ENDPOINT /purchase-validation (líneas 936-1024) CON ESTE:
 app.post('/purchase-validation', async (req, res) => {
     try {
-        const validation = req.body;
-
-        console.log(`🔍 VALIDACIÓN RECIBIDA:`, validation);
-        
-        if (!validation.request_id) {
-            return res.status(400).json({ error: "Datos de validación inválidos" });
-        }
-        
-        // Registrar para depuración
-        console.log(`Procesando validación para request_id: ${validation.request_id}, status: ${validation.status}`);
-        
-        // Verificar si ya hemos procesado una validación final para este request_id
-        const checkQuery = `
-            SELECT status 
-            FROM purchase_requests 
-            WHERE request_id = $1
-            -- AND status IN ('ACCEPTED', 'REJECTED')
-        `;
-        
-        const checkResult = await client.query(checkQuery, [validation.request_id]);
-
-        console.log(`🔍 Estado actual encontrado:`, checkResult.rows);
-        
-        // Si ya existe una validación final, no procesar esta
-        if (checkResult.rows.length > 0 && ['ACCEPTED', 'REJECTED'].includes(checkResult.rows[0].status)) {
-            console.log(`Validación duplicada para request_id ${validation.request_id}, ignorando`);
-            return res.json({ 
-                status: "ignored", 
-                message: `La solicitud ${validation.request_id} ya ha sido validada con estado ${checkResult.rows[0].status}`
-            });
-        }
-
-        console.log(`🔄 Actualizando request_id ${validation.request_id} a status: ${validation.status}`);
-        
-        // Actualizar estado de la solicitud de compra
-        const updateQuery = `
-            UPDATE purchase_requests 
-            SET status = $1, 
-                reason = $2,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE request_id = $3
-            RETURNING user_id, symbol, quantity, price
-        `;
-        
-        const updateResult = await client.query(updateQuery, [
-            validation.status,
-            validation.reason || null,
-            validation.request_id
-        ]);
-        
-        if (updateResult.rows.length === 0) {
-            console.log(`No se encontró la solicitud ${validation.request_id} en nuestra base de datos`);
-            return res.status(404).json({ error: "Solicitud de compra no encontrada" });
-        }
-        
-        const purchase = updateResult.rows[0];
-        const totalCost = purchase.price * purchase.quantity;
-        
-        // Registrar evento de validación
-        await logEvent('PURCHASE_VALIDATION', {
-            request_id: validation.request_id,
-            status: validation.status,
-            reason: validation.reason,
-            symbol: purchase.symbol,
-            quantity: purchase.quantity,
-            price: purchase.price
+      const validation = req.body;
+  
+      console.log(`🔍 VALIDACIÓN RECIBIDA:`, validation);
+      
+      if (!validation.request_id) {
+        return res.status(400).json({ error: "Datos de validación inválidos" });
+      }
+      
+      // Verificar si es una transacción WebPay
+      const webpayCheck = await client.query(`
+        SELECT COUNT(*) as count FROM webpay_transactions 
+        WHERE request_id = $1
+      `, [validation.request_id]);
+      
+      const isWebpayTransaction = webpayCheck.rows[0].count > 0;
+      
+      if (isWebpayTransaction) {
+        console.log(`🔍 Validación de WebPay detectada para ${validation.request_id}, ignorando (ya procesada por WebPay)`);
+        return res.json({ 
+          status: "ignored", 
+          message: "Transacción WebPay ya procesada directamente" 
         });
-        
-        // Si la compra fue aceptada, descontar de la billetera
-        if (validation.status === 'ACCEPTED') {
-            await client.query(`
-                UPDATE wallet 
-                SET balance = balance - $1,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE user_id = $2
-            `, [totalCost, purchase.user_id]);
-            
-            console.log(`Compra aceptada: descontado $${totalCost} de la wallet del usuario ${purchase.user_id}`);
-        } 
-        // Si la compra fue rechazada, devolver la cantidad reservada
-        else if (validation.status === 'REJECTED' || validation.status === 'error') {
-            // Obtener la entrada más reciente de la acción
-            const stockQuery = `
-                SELECT id FROM stocks 
-                WHERE symbol = $1 
-                ORDER BY timestamp DESC 
-                LIMIT 1
-            `;
-            
-            const stockResult = await client.query(stockQuery, [purchase.symbol]);
-            
-            if (stockResult.rows.length > 0) {
-                await client.query(`
-                    UPDATE stocks 
-                    SET quantity = quantity + $1 
-                    WHERE id = $2
-                `, [purchase.quantity, stockResult.rows[0].id]);
-                
-                console.log(`Compra rechazada: devueltas ${purchase.quantity} acciones de ${purchase.symbol} al inventario`);
-            }
-        }
-        
-        res.json({ status: "success" });
+      }
+      
+      // Registrar para depuración
+      console.log(`Procesando validación para request_id: ${validation.request_id}, status: ${validation.status}`);
+      
+      // Verificar si ya hemos procesado una validación final para este request_id
+      const checkQuery = `
+        SELECT status 
+        FROM purchase_requests 
+        WHERE request_id = $1
+      `;
+      
+      const checkResult = await client.query(checkQuery, [validation.request_id]);
+  
+      console.log(`🔍 Estado actual encontrado:`, checkResult.rows);
+      
+      // Si ya existe una validación final, no procesar esta
+      if (checkResult.rows.length > 0 && ['ACCEPTED', 'REJECTED'].includes(checkResult.rows[0].status)) {
+        console.log(`Validación duplicada para request_id ${validation.request_id}, ignorando`);
+        return res.json({ 
+          status: "ignored", 
+          message: `La solicitud ${validation.request_id} ya ha sido validada con estado ${checkResult.rows[0].status}`
+        });
+      }
+  
+      console.log(`🔄 Actualizando request_id ${validation.request_id} a status: ${validation.status}`);
+      
+      // Actualizar estado de la solicitud de compra
+      const updateQuery = `
+        UPDATE purchase_requests 
+        SET status = $1, 
+            reason = $2,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE request_id = $3
+        RETURNING user_id, symbol, quantity, price
+      `;
+      
+      const updateResult = await client.query(updateQuery, [
+        validation.status,
+        validation.reason || null,
+        validation.request_id
+      ]);
+      
+      if (updateResult.rows.length === 0) {
+        console.log(`No se encontró la solicitud ${validation.request_id} en nuestra base de datos`);
+        return res.status(404).json({ error: "Solicitud de compra no encontrada" });
+      }
+      
+      const purchase = updateResult.rows[0];
+      
+      // Registrar evento de validación
+      await logEvent('PURCHASE_VALIDATION', {
+        request_id: validation.request_id,
+        status: validation.status,
+        reason: validation.reason,
+        symbol: purchase.symbol,
+        quantity: purchase.quantity,
+        price: purchase.price
+      });
+      
+      // NOTA: No se maneja wallet ni stocks aquí para transacciones WebPay
+      // porque ya se procesan directamente en webpayController.js
+      
+      res.json({ status: "success" });
     } catch (error) {
-        console.error("Error procesando validación de compra:", error);
-        res.status(500).json({ error: "Error interno del servidor" });
+      console.error("Error procesando validación de compra:", error);
+      res.status(500).json({ error: "Error interno del servidor" });
     }
-});
+  });
 
 // Procesar compra externa (de otros grupos)
 // Asegúrate de que esta ruta exista exactamente así
