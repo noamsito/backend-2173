@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS purchases (
 -- Tabla de transacciones de Webpay
 CREATE TABLE IF NOT EXISTS webpay_transactions (
     id SERIAL PRIMARY KEY,
-    user_id VARCHAR(255) NOT NULL,
+    user_id INTEGER NOT NULL,  -- Cambiar de VARCHAR a INTEGER si es necesario
     buy_order VARCHAR(255) UNIQUE NOT NULL,
     session_id VARCHAR(255) NOT NULL,
     token_ws VARCHAR(255),

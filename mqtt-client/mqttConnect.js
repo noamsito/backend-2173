@@ -212,15 +212,6 @@ async function handlePurchaseMessage(messageStr) {
                 if (purchaseData.status !== 'OK') {
                     console.log(`🔄 Reenviando respuesta por stocks/validation: ${purchaseData.request_id}, status: ${purchaseData.status}`);
                     client.publish(VALIDATION_TOPIC, JSON.stringify(purchaseData));
-                    /*
-                    const endpointUrl = "http://api:3000/purchase-validation";
-                    
-                    await fetchWithRetry(endpointUrl, {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify(purchaseData)
-                    }, "validación de compra");
-                    */
                 } else {
                     console.log(`Confirmación de recepción para nuestra solicitud: ${purchaseData.request_id}`);
                 }
@@ -237,12 +228,16 @@ async function handlePurchaseMessage(messageStr) {
                 return;
             }
             
+            // NUEVO: Verificar si tiene deposit_token (solicitudes con WebPay)
+            if (purchaseData.deposit_token) {
+                console.log(`Solicitud con WebPay detectada: ${purchaseData.request_id}, deposit_token: ${purchaseData.deposit_token}`);
+            }
+            
             // Verificamos si la solicitud es de otro grupo (no nuestra)
             if (String(purchaseData.group_id) !== String(GROUP_ID)) {
                 console.log(`Compra externa del grupo ${purchaseData.group_id} detectada para ${purchaseData.symbol}`);
                 
                 // Reenviar la compra externa a nuestra API para actualizar inventario
-                // La API se encargará de registrar el evento de compra externa
                 const endpointUrl = "http://api:3000/external-purchase";
                 
                 await fetchWithRetry(endpointUrl, {
@@ -263,6 +258,7 @@ async function handlePurchaseMessage(messageStr) {
         console.error("Error procesando mensaje:", err);
     }
 }
+
 
 // Nueva función para verificar si un request_id pertenece a nuestro grupo
 async function checkIfRequestBelongsToUs(requestId) {

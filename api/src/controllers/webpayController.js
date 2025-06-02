@@ -180,31 +180,19 @@ export class WebpayController {
       
       console.log(`🔄 Procesando compra exitosa: ${quantity} acciones de ${symbol} para usuario ${user_id}`);
       
-      // 1. Crear solicitud de compra en purchase_requests
-      const purchaseQuery = `
-        INSERT INTO purchase_requests 
-        (request_id, user_id, symbol, quantity, price, status) 
-        VALUES ($1, $2, $3, $4, $5, 'PENDING')
-        ON CONFLICT (request_id) DO UPDATE SET
-          status = 'PENDING',
-          updated_at = CURRENT_TIMESTAMP
+      // 1. ACTUALIZAR SOLICITUD DE COMPRA (ya existe desde el flujo inicial)
+      const updatePurchaseQuery = `
+        UPDATE purchase_requests 
+        SET status = 'ACCEPTED',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE request_id = $1
         RETURNING id
       `;
       
-      const price = amount / quantity; // Calcular precio por acción
+      await client.query(updatePurchaseQuery, [request_id]);
+      console.log(`✅ Solicitud de compra actualizada a ACCEPTED: ${request_id}`);
       
-      await client.query(purchaseQuery, [
-        request_id, 
-        user_id,
-        symbol, 
-        quantity, 
-        price
-      ]);
-      
-      console.log(`✅ Solicitud de compra registrada: ID ${request_id}`);
-      
-      // 2. Descontar dinero de la wallet
-      /*
+      // 2. DESCONTAR DINERO DE LA WALLET
       await client.query(`
         UPDATE wallet 
         SET balance = balance - $1,
@@ -213,44 +201,44 @@ export class WebpayController {
       `, [amount, user_id]);
       
       console.log(`💰 Descontado $${amount} de la wallet del usuario ${user_id}`);
-      */
       
-      // 3. Reservar acciones temporalmente
-      const stockQuery = `
-        UPDATE stocks 
-        SET quantity = quantity - $1 
-        WHERE symbol = $2 AND quantity >= $1
-        RETURNING id
-      `;
-      
-      const stockResult = await client.query(stockQuery, [quantity, symbol]);
-      
-      if (stockResult.rows.length === 0) {
-        throw new Error(`No hay suficientes acciones de ${symbol} disponibles`);
-      }
-      
-      console.log(`📦 Reservadas ${quantity} acciones de ${symbol} temporalmente`);
-      
-      // 4. Enviar solicitud al broker MQTT
-      const message = {
+      // 3. ENVIAR VALIDACIÓN POR MQTT (según enunciado)
+      const validationMessage = {
         request_id: request_id,
-        group_id: process.env.GROUP_ID || "1",
-        quantity: quantity,
-        symbol: symbol,
-        operation: "BUY"
+        timestamp: new Date().toISOString(),
+        status: "ACCEPTED",
+        reason: "Pago procesado exitosamente via WebPay"
       };
       
       try {
         await axios.post('http://mqtt-client:3000/publish', {
-          topic: 'stocks/requests',
-          message: message
+          topic: 'stocks/validation',
+          message: validationMessage
         });
         
-        console.log(`📡 Solicitud enviada al broker MQTT: ${request_id}`);
+        console.log(`📡 Validación enviada por stocks/validation: ${request_id}`);
       } catch (mqttError) {
-        console.error('❌ Error enviando al broker MQTT:', mqttError);
-        // No fallar la compra por esto, el broker puede estar temporalmente caído
+        console.error('❌ Error enviando validación al broker MQTT:', mqttError);
+        // No fallar la compra por esto
       }
+      
+      // 4. REGISTRAR EVENTO DE COMPRA EXITOSA
+      await client.query(`
+        INSERT INTO events (type, details)
+        VALUES ($1, $2)
+      `, [
+        'PURCHASE_VALIDATION',
+        JSON.stringify({
+          request_id: request_id,
+          status: 'ACCEPTED',
+          symbol: symbol,
+          quantity: quantity,
+          price: amount / quantity,
+          user_id: user_id,
+          payment_method: 'webpay',
+          event_text: `Compraste ${quantity} acciones de ${symbol} por un total de $${amount.toFixed(2)}.`
+        })
+      ]);
       
       return { success: true };
       
@@ -259,6 +247,7 @@ export class WebpayController {
       return { success: false, error: error.message };
     }
   }
+  
   /*
   static async handleReturn(req, res) {
     try {

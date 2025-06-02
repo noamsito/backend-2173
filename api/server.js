@@ -584,6 +584,7 @@ app.get('/wallet/balance', checkJwt, syncUser, async (req, res) => {
 // ENDPOINTS DE COMPRA DE ACCIONES ===========================================
 
 // Comprar acciones (versión mejorada)
+// Comprar acciones (versión corregida para WebPay)
 app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
     try {
         const { symbol, quantity } = req.body;
@@ -593,7 +594,6 @@ app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
         }
         
         console.log(`Procesando solicitud de compra: ${quantity} acciones de ${symbol}`);
-        
         
         // Obtener precio actual y disponibilidad de la acción
         const stockQuery = `
@@ -628,7 +628,7 @@ app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
         if (walletResult.rows.length === 0 || walletResult.rows[0].balance < totalCost) {
             return res.status(400).json({ error: "Fondos insuficientes" });
         }
-        // Aquí se integró webpay
+        
         // Generar UUID para la solicitud
         const requestId = uuidv4();
         const shortRequestId = requestId.split('-')[0]; 
@@ -636,13 +636,14 @@ app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
         const sessionId = `session-${req.userId}-${Date.now()}`;
         const returnUrl = process.env.TRANSBANK_RETURN_URL || 'http://localhost:3000/webpay/return';
 
-        // Procesar el pago con Transbank
+        // 1. CREAR TRANSACCIÓN WEBPAY
         const webpayResult = await TransbankService.createTransaction(
             buyOrder,
             sessionId,
             totalCost,
             returnUrl
         );
+        
         if (!webpayResult.success) {
             console.error("Error al crear transacción webpay:", webpayResult.error);
             return res.status(500).json({
@@ -651,29 +652,16 @@ app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
             });
         }
 
-        console.log(`Pago webpay iniciado exitosamente para request_id: ${requestId}`);
+        console.log(`Transacción WebPay creada exitosamente: ${webpayResult.token}`);
 
-        // Verificar si la orden de compra ya existe
-        const existingQuery = `
-            SELECT COUNT(*) as count FROM webpay_transactions 
-            WHERE buy_order = $1
-        `;
-        
-        const existingResult = await client.query(existingQuery, [buyOrder]);
-        
-        if (existingResult.rows[0].count > 0) {
-            console.error(`Buy order ya existe: ${buyOrder}`);
-            return res.status(500).json({
-                error: "Error: orden de compra duplicada"
-            });
-        }
-
+        // 2. GUARDAR TRANSACCIÓN EN BASE DE DATOS
         const webpayTransactionQuery = `
             INSERT INTO webpay_transactions
             (user_id, buy_order, session_id, token_ws, amount, status, symbol, quantity, request_id, created_at)
             VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7, $8, NOW())
-            returning id
+            RETURNING id
         `;
+        
         await client.query(webpayTransactionQuery, [
             req.userId,
             buyOrder,
@@ -684,23 +672,8 @@ app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
             quantity,
             requestId
         ]);
-        console.log(`Transacción webpay guardada como pendiente: ID ${requestId}`);
 
-        // Retornar datos de webpay
-        res.json({
-            message: "Transaccion de pago creada exitosamente",
-            requiresPayment: true,
-            webpayUrl: webpayResult.url,
-            webpayToken: webpayResult.token,
-            request_id: requestId
-        });
-        // Fin integración webpay
-
-        
-        /*
-        Código que estaba antes de la integración de webpay. Se dejó por si acaso.
-
-        // Crear solicitud de compra en la base de datos (solo si el pago fue exitoso)
+        // 3. CREAR SOLICITUD DE COMPRA EN PURCHASE_REQUESTS
         const purchaseQuery = `
             INSERT INTO purchase_requests 
             (request_id, user_id, symbol, quantity, price, status) 
@@ -715,36 +688,38 @@ app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
             quantity, 
             stock.price
         ]);
-        
-        console.log(`Solicitud de compra registrada: ID ${requestId}`);
-        
-        // Reservar temporalmente la cantidad de acciones
+
+        // 4. RESERVAR ACCIONES TEMPORALMENTE
         await client.query(`
             UPDATE stocks 
             SET quantity = quantity - $1 
             WHERE id = $2
         `, [quantity, stock.id]);
-        
-        console.log(`Reservadas ${quantity} acciones de ${symbol} temporalmente`);
-        
-        // Crear el mensaje para el broker MQTT
-        const message = {
+
+        // 5. ENVIAR MENSAJE MQTT CON DEPOSIT_TOKEN (SEGÚN ENUNCIADO)
+        const mqttMessage = {
             request_id: requestId,
             group_id: GROUP_ID,
             quantity: quantity,
             symbol: symbol,
-            operation: "BUY"
+            stock_origin: 0,
+            operation: "BUY",
+            deposit_token: webpayResult.token  // ← CAMPO REQUERIDO POR ENUNCIADO
         };
         
-        // Publicar solicitud de compra al broker MQTT
-        await axios.post('http://mqtt-client:3000/publish', {
-            topic: 'stocks/requests',
-            message: message
-        });
-        
-        console.log(`Solicitud enviada al broker MQTT: ${requestId}`);
-        
-        // Registrar evento
+        try {
+            await axios.post('http://mqtt-client:3000/publish', {
+                topic: 'stocks/requests',
+                message: mqttMessage
+            });
+            
+            console.log(`Solicitud enviada al broker MQTT con deposit_token: ${requestId}`);
+        } catch (mqttError) {
+            console.error('Error enviando al broker MQTT:', mqttError);
+            // No fallar la compra por esto
+        }
+
+        // 6. REGISTRAR EVENTO
         await logEvent('PURCHASE_REQUEST', {
             request_id: requestId,
             user_id: req.userId,
@@ -752,20 +727,19 @@ app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
             quantity: quantity,
             price: stock.price,
             group_id: GROUP_ID,
-            webpay_token: webpayResult.token // Agregado para webpay
+            webpay_token: webpayResult.token,
+            deposit_token: webpayResult.token
         });
         
-        res.json({ 
-            status: "success", 
-            message: "Pago procesado y Solicitud de compra enviada", 
-            request_id: requestId,
-            webpay: { // Agregado para webpay
-                token: webpayResult.token,
-                url: webpayResult.url,
-                buy_order: buyOrder
-            }
+        // 7. RETORNAR DATOS PARA REDIRECCIÓN A WEBPAY
+        res.json({
+            message: "Transacción de pago creada exitosamente",
+            requiresPayment: true,
+            webpayUrl: webpayResult.url,
+            webpayToken: webpayResult.token,
+            request_id: requestId
         });
-        */
+        
     } catch (error) {
         console.error("Error procesando compra:", error);
         res.status(500).json({ error: "Error interno del servidor" });
