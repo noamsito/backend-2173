@@ -295,23 +295,39 @@ export class WebpayController {
         // Continuar con el proceso
       }
       
-      // 4. REGISTRAR EVENTO DE COMPRA EXITOSA
-      await client.query(`
-        INSERT INTO events (type, details)
-        VALUES ($1, $2)
-      `, [
-        'PURCHASE_VALIDATION',
-        JSON.stringify({
-          request_id: request_id,
-          status: 'ACCEPTED',
-          symbol: symbol,
-          quantity: quantity,
-          price: amount / quantity,
-          user_id: user_id,
-          payment_method: 'webpay',
-          event_text: `Compraste ${quantity} acciones de ${symbol} por un total de $${amount.toFixed(2)}.`
-        })
-      ]);
+      // 4. REGISTRAR EVENTO DE COMPRA EXITOSA usando logEvent
+      const eventDetails = {
+        request_id: request_id,
+        status: 'ACCEPTED',
+        symbol: symbol,
+        quantity: quantity,
+        price: amount / quantity,
+        user_id: user_id,
+        payment_method: 'webpay',
+        timestamp: new Date().toISOString()
+      };
+      
+      // Usar la función logEvent del servidor principal
+      try {
+        await axios.post('http://api:3000/events', {
+          type: 'PURCHASE_VALIDATION',
+          details: eventDetails
+        });
+        console.log(`✅ Evento de compra WebPay registrado: ${request_id}`);
+      } catch (eventError) {
+        console.error('❌ Error registrando evento de compra:', eventError);
+        // Registrar directamente como fallback
+        await client.query(`
+          INSERT INTO events (type, details)
+          VALUES ($1, $2)
+        `, [
+          'PURCHASE_VALIDATION',
+          JSON.stringify({
+            ...eventDetails,
+            event_text: `Compraste ${quantity} acciones de ${symbol} por un total de $${amount.toFixed(2)}.`
+          })
+        ]);
+      }
       
       return { success: true };
       
