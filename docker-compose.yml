@@ -8,7 +8,10 @@ services:
     ports:
       - "3000:3000"
     depends_on:
-      - db
+      db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     environment:
       - DB_HOST=db
       - DB_USER=postgres
@@ -20,6 +23,11 @@ services:
       - NEW_RELIC_APP_NAME=new_relic_back
       - NEW_RELIC_LOG=stdout
       - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/  # NUEVA VARIABLE
+      - TRANSBANK_ENVIRONMENT=integration
+      - TRNASBANK_COMMERCE_CODE=597055555532
+      - TRANSBANK_API_KEY=579B532A7440BB0C9079DED94D31EA1615BACEB56610332264630D42D0A36B1C
+      - TRANSBANK_RETURN_URL=http://localhost:3000/webpay/return
+      - TRANSBANK_FINAL_URL=http://localhost:80/payment/result
     volumes:
       - ./mqtt-client:/app/mqtt-client
     restart: unless-stopped
@@ -46,7 +54,7 @@ services:
       - POSTGRES_PASSWORD=admin123
       - POSTGRES_DB=stock_data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d stock_data"]
       interval: 5s
       timeout: 5s
       retries: 5

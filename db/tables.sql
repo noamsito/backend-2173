@@ -65,6 +65,24 @@ CREATE TABLE IF NOT EXISTS purchases (
   created_at TIMESTAMP DEFAULT NOW()
 );
 
+
+-- Tabla de transacciones de Webpay
+CREATE TABLE IF NOT EXISTS webpay_transactions (
+    id SERIAL PRIMARY KEY,
+    user_id VARCHAR(255) NOT NULL,
+    buy_order VARCHAR(255) UNIQUE NOT NULL,
+    session_id VARCHAR(255) NOT NULL,
+    token_ws VARCHAR(255),
+    amount DECIMAL(10,2) NOT NULL,
+    status VARCHAR(50) DEFAULT 'pending',
+    symbol VARCHAR(10),
+    quantity INTEGER,
+    request_id VARCHAR(255),
+    authorization_code VARCHAR(255),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- AGREGAR AL FINAL: Columna status a purchases también (para compatibilidad con Sequelize)
 ALTER TABLE purchases ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'PENDING';
 
@@ -82,6 +100,12 @@ CREATE INDEX IF NOT EXISTS idx_purchase_requests_status ON purchase_requests(sta
 
 -- Actualizar registros existentes que no tengan status
 UPDATE purchase_requests SET status = 'PENDING' WHERE status IS NULL;
+
+-- Webpay
+CREATE INDEX IF NOT EXISTS idx_webpay_user_id ON webpay_transactions(user_id);
+CREATE INDEX IF NOT EXISTS idx_webpay_token ON webpay_transactions(token_ws);
+CREATE INDEX IF NOT EXISTS idx_webpay_request_id ON webpay_transactions(request_id);
+CREATE INDEX IF NOT EXISTS idx_webpay_status ON webpay_transactions(status);
 
 -- Database connection settings
 \set DB_NAME 'stock_data'

@@ -1,4 +1,4 @@
-import express from 'express';
+import express, { request } from 'express';
 import cors from 'cors';
 import pg from 'pg';
 import dotenv from 'dotenv';
@@ -9,6 +9,8 @@ import { createSyncUserMiddleware } from './auth-integration.js';
 import mqtt from 'mqtt';
 import axios from 'axios';
 import sequelize from './db/db.js';
+import { TransbankService } from './src/services/webpayService.js';
+import webpayRoutes from './src/routes/webpayRoutes.js';
 
 const Pool = pg.Pool;
 const app = express();
@@ -35,6 +37,9 @@ const checkJwt = auth({
     issuerBaseURL: `https://${process.env.AUTH0_DOMAIN}` || 'https://dev-ouxdigl1l6bn6n3r.us.auth0.com/',
     tokenSigningAlg: 'RS256'
 });
+
+// Webpay routes
+app.use('/webpay', webpayRoutes);
 
 // CORS configuration
 app.use(cors({
@@ -623,11 +628,78 @@ app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
         if (walletResult.rows.length === 0 || walletResult.rows[0].balance < totalCost) {
             return res.status(400).json({ error: "Fondos insuficientes" });
         }
-        
+        // Aquí se integró webpay
         // Generar UUID para la solicitud
         const requestId = uuidv4();
+        const shortRequestId = requestId.split('-')[0]; 
+        const buyOrder = `${symbol}-${shortRequestId}`;
+        const sessionId = `session-${req.userId}-${Date.now()}`;
+        const returnUrl = process.env.TRANSBANK_RETURN_URL || 'http://localhost:3000/webpay/return';
+
+        // Procesar el pago con Transbank
+        const webpayResult = await TransbankService.createTransaction(
+            buyOrder,
+            sessionId,
+            totalCost,
+            returnUrl
+        );
+        if (!webpayResult.success) {
+            console.error("Error al crear transacción webpay:", webpayResult.error);
+            return res.status(500).json({
+                error: "Error al procesar el pago",
+                details: webpayResult.error
+            });
+        }
+
+        console.log(`Pago webpay iniciado exitosamente para request_id: ${requestId}`);
+
+        // Verificar si la orden de compra ya existe
+        const existingQuery = `
+            SELECT COUNT(*) as count FROM webpay_transactions 
+            WHERE buy_order = $1
+        `;
         
-        // Crear solicitud de compra en la base de datos
+        const existingResult = await client.query(existingQuery, [buyOrder]);
+        
+        if (existingResult.rows[0].count > 0) {
+            console.error(`Buy order ya existe: ${buyOrder}`);
+            return res.status(500).json({
+                error: "Error: orden de compra duplicada"
+            });
+        }
+
+        const webpayTransactionQuery = `
+            INSERT INTO webpay_transactions
+            (user_id, buy_order, session_id, token_ws, amount, status, symbol, quantity, request_id, created_at)
+            VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7, $8, NOW())
+            returning id
+        `;
+        await client.query(webpayTransactionQuery, [
+            req.userId,
+            buyOrder,
+            sessionId,
+            webpayResult.token,
+            totalCost,
+            symbol,
+            quantity,
+            requestId
+        ]);
+        console.log(`Transacción webpay guardada como pendiente: ID ${requestId}`);
+
+        // Retornar datos de webpay
+        res.json({
+            message: "Transaccion de pago creada exitosamente",
+            requiresPayment: true,
+            webpayUrl: webpayResult.url,
+            webpayToken: webpayResult.token,
+            request_id: requestId
+        });
+        // Fin integración webpay
+
+        /*
+        Código que estaba antes de la integración de webpay. Se dejó por si acaso.
+
+        // Crear solicitud de compra en la base de datos (solo si el pago fue exitoso)
         const purchaseQuery = `
             INSERT INTO purchase_requests 
             (request_id, user_id, symbol, quantity, price, status) 
@@ -678,19 +750,28 @@ app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
             symbol: symbol,
             quantity: quantity,
             price: stock.price,
-            group_id: GROUP_ID
+            group_id: GROUP_ID,
+            webpay_token: webpayResult.token // Agregado para webpay
         });
         
         res.json({ 
             status: "success", 
-            message: "Solicitud de compra enviada", 
-            request_id: requestId 
+            message: "Pago procesado y Solicitud de compra enviada", 
+            request_id: requestId,
+            webpay: { // Agregado para webpay
+                token: webpayResult.token,
+                url: webpayResult.url,
+                buy_order: buyOrder
+            }
         });
+        */
     } catch (error) {
         console.error("Error procesando compra:", error);
         res.status(500).json({ error: "Error interno del servidor" });
     }
 });
+
+
 
 // Obtener compras del usuario (versión mejorada)
 app.get('/purchases', checkJwt, syncUser, async (req, res) => {
@@ -707,7 +788,7 @@ app.get('/purchases', checkJwt, syncUser, async (req, res) => {
                 pr.request_id, 
                 pr.symbol, 
                 pr.quantity, 
-                pr.price, 
+                pr.price as price_at_purchase, 
                 pr.status, 
                 pr.reason,
                 pr.created_at,
@@ -715,14 +796,32 @@ app.get('/purchases', checkJwt, syncUser, async (req, res) => {
             FROM purchase_requests pr
             JOIN latest_stocks ls ON pr.symbol = ls.symbol
             WHERE pr.user_id = $1
+            -- AND pr.status IN ('PENDING', 'ACCEPTED')
             ORDER BY pr.created_at DESC
         `;
-        
+
+        const result = await client.query(purchasesQuery, [req.userId]);
+
+        const purchases = result.rows.map(row => ({
+            id: row.id,
+            request_id: row.request_id,
+            symbol: row.symbol,
+            quantity: row.quantity,
+            priceAtPurchase: row.price_at_purchase,  // ← MAPEAR NOMBRE
+            status: row.status,
+            reason: row.reason,
+            createdAt: row.created_at,              // ← MAPEAR NOMBRE
+            longName: row.long_name
+        }));
+
+        res.json(purchases);
+        /*
         const purchasesResult = await client.query(purchasesQuery, [req.userId]);
         
         console.log(`Obtenidas ${purchasesResult.rows.length} compras para el usuario ${req.userId}`);
         
         res.json({ data: purchasesResult.rows });
+        */
     } catch (error) {
         console.error("Error obteniendo compras:", error);
         res.status(500).json({ error: "Error interno del servidor" });
@@ -762,6 +861,8 @@ app.get('/debug/check-duplicates', async (req, res) => {
 app.post('/purchase-validation', async (req, res) => {
     try {
         const validation = req.body;
+
+        console.log(`🔍 VALIDACIÓN RECIBIDA:`, validation);
         
         if (!validation.request_id) {
             return res.status(400).json({ error: "Datos de validación inválidos" });
@@ -775,19 +876,23 @@ app.post('/purchase-validation', async (req, res) => {
             SELECT status 
             FROM purchase_requests 
             WHERE request_id = $1
-            AND status IN ('ACCEPTED', 'REJECTED')
+            -- AND status IN ('ACCEPTED', 'REJECTED')
         `;
         
         const checkResult = await client.query(checkQuery, [validation.request_id]);
+
+        console.log(`🔍 Estado actual encontrado:`, checkResult.rows);
         
         // Si ya existe una validación final, no procesar esta
-        if (checkResult.rows.length > 0) {
+        if (checkResult.rows.length > 0 && ['ACCEPTED', 'REJECTED'].includes(checkResult.rows[0].status)) {
             console.log(`Validación duplicada para request_id ${validation.request_id}, ignorando`);
             return res.json({ 
                 status: "ignored", 
                 message: `La solicitud ${validation.request_id} ya ha sido validada con estado ${checkResult.rows[0].status}`
             });
         }
+
+        console.log(`🔄 Actualizando request_id ${validation.request_id} a status: ${validation.status}`);
         
         // Actualizar estado de la solicitud de compra
         const updateQuery = `
@@ -1158,6 +1263,54 @@ app.get('/api/purchases/stats', async (req, res) => {
         });
     }
 });
+
+// Agregar endpoint /stats (SIN autenticación para que SystemStatus funcione)
+app.get('/stats', async (req, res) => {
+    try {
+        console.log('🔍 GET /stats - Sin autenticación');
+        
+        const totalQuery = `SELECT COUNT(*) as total FROM purchase_requests`;
+        const totalResult = await client.query(totalQuery);
+        
+        const statusQuery = `
+            SELECT status, COUNT(*) as count
+            FROM purchase_requests 
+            GROUP BY status
+        `;
+        const statusResult = await client.query(statusQuery);
+        
+        const stats = {
+            total: parseInt(totalResult.rows[0]?.total || 0),
+            processed: 0,
+            pending: 0,
+            failed: 0
+        };
+        
+        statusResult.rows.forEach(row => {
+            const count = parseInt(row.count);
+            switch(row.status?.toUpperCase()) {
+                case 'ACCEPTED':
+                    stats.processed = count;
+                    break;
+                case 'PENDING':
+                    stats.pending = count;
+                    break;
+                case 'REJECTED':
+                case 'ERROR':
+                    stats.failed = count;
+                    break;
+            }
+        });
+        
+        console.log('📊 Stats enviadas:', stats);
+        res.json(stats);
+        
+    } catch (error) {
+        console.error('Error obteniendo estadísticas:', error);
+        res.status(500).json({ error: 'Error interno del servidor' });
+    }
+});
+
 
 app.listen(port, '0.0.0.0',() => {
     console.log(`Servidor ejecutándose en http://localhost:${port}`);
