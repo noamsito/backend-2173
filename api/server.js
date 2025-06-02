@@ -17,6 +17,7 @@ const app = express();
 const port = 3000;
 
 dotenv.config();
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:80';
 
 // Configuración de la base de datos
 const pool = new Pool({
@@ -616,18 +617,9 @@ app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
         }
         
         const totalCost = stock.price * quantity;
-        
-        // Verificar saldo en billetera
-        const walletQuery = `
-            SELECT balance FROM wallet 
-            WHERE user_id = $1
-        `;
-        
-        const walletResult = await client.query(walletQuery, [req.userId]);
-        
-        if (walletResult.rows.length === 0 || walletResult.rows[0].balance < totalCost) {
-            return res.status(400).json({ error: "Fondos insuficientes" });
-        }
+
+        // ✅ SIN VERIFICACIÓN DE WALLET - El pago se valida via WebPay
+        console.log(`💰 Total a pagar: $${totalCost} (será validado por WebPay)`);
         
         // Generar UUID para la solicitud
         const requestId = uuidv4();
@@ -690,34 +682,9 @@ app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
         ]);
 
         // 4. RESERVAR ACCIONES TEMPORALMENTE
-        await client.query(`
-            UPDATE stocks 
-            SET quantity = quantity - $1 
-            WHERE id = $2
-        `, [quantity, stock.id]);
+        console.log(`📊 Acciones disponibles: ${stock.quantity}, solicitadas: ${quantity}`);
 
-        // 5. ENVIAR MENSAJE MQTT CON DEPOSIT_TOKEN (SEGÚN ENUNCIADO)
-        const mqttMessage = {
-            request_id: requestId,
-            group_id: GROUP_ID,
-            quantity: quantity,
-            symbol: symbol,
-            stock_origin: 0,
-            operation: "BUY",
-            deposit_token: webpayResult.token  // ← CAMPO REQUERIDO POR ENUNCIADO
-        };
-        
-        try {
-            await axios.post('http://mqtt-client:3000/publish', {
-                topic: 'stocks/requests',
-                message: mqttMessage
-            });
-            
-            console.log(`Solicitud enviada al broker MQTT con deposit_token: ${requestId}`);
-        } catch (mqttError) {
-            console.error('Error enviando al broker MQTT:', mqttError);
-            // No fallar la compra por esto
-        }
+        console.log(`💾 Solicitud de compra creada: ${requestId}, esperando confirmación de pago WebPay`);
 
         // 6. REGISTRAR EVENTO
         await logEvent('PURCHASE_REQUEST', {

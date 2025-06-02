@@ -71,25 +71,79 @@ export class WebpayController {
 
    //Manejar retorno de Webpay
 
-  static async handleReturn(req, res) {
+   static async handleReturn(req, res) {
     try {
       const { token_ws } = req.body || req.query;
-
+  
       console.log('=== WEBPAY RETURN ===');
       console.log('Method:', req.method);
       console.log('Token recibido:', token_ws);
       console.log('Body completo:', req.body);
       console.log('Query completo:', req.query);
       console.log('=====================');
-
+  
+      // *** DETECTAR CANCELACIÓN ***
       // *** DETECTAR CANCELACIÓN ***
       if (!token_ws || token_ws.trim() === '') {
         console.log('❌ Cancelación detectada: token vacío o nulo');
-        return res.redirect(`http://localhost:80/stocks/cancelado?status=cancelled&message=Compra cancelada por el usuario`);
+        
+        // ✅ NUEVO: Buscar transacción pendiente para cancelarla
+        try {
+          const client = await pool.connect();
+          
+          // Buscar transacciones pendientes recientes (último minuto)
+          const recentTransactionQuery = `
+            SELECT * FROM webpay_transactions 
+            WHERE status = 'pending' 
+            AND created_at > NOW() - INTERVAL '1 minute'
+            ORDER BY created_at DESC 
+            LIMIT 1
+          `;
+          
+          const recentResult = await client.query(recentTransactionQuery);
+          
+          if (recentResult.rows.length > 0) {
+            const transaction = recentResult.rows[0];
+            
+            // Marcar como cancelada
+            await client.query(`
+              UPDATE webpay_transactions 
+              SET status = 'cancelled', updated_at = NOW() 
+              WHERE id = $1
+            `, [transaction.id]);
+            
+            // Enviar validación de cancelación al broker
+            const validationMessage = {
+              request_id: transaction.request_id,
+              timestamp: new Date().toISOString(),
+              status: "REJECTED",
+              reason: "Pago cancelado por el usuario"
+            };
+            
+            try {
+              await axios.post('http://mqtt-client:3000/publish', {
+                topic: 'stocks/validation',
+                message: validationMessage
+              });
+              console.log(`📡 Cancelación enviada por stocks/validation: ${transaction.request_id}`);
+            } catch (mqttError) {
+              console.error('❌ Error enviando cancelación al broker MQTT:', mqttError);
+            }
+            
+            console.log(`❌ Transacción cancelada: ${transaction.request_id}`);
+          }
+          
+          client.release();
+        } catch (error) {
+          console.error('Error procesando cancelación:', error);
+        }
+        
+        const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:80';
+        return res.redirect(`${frontendUrl}/stocks/cancelado?status=cancelled&message=Compra cancelada por el usuario`);
       }
-
+  
       console.log(`✅ Procesando token válido: ${token_ws}`);
-
+  
       const client = await pool.connect();
       
       try {
@@ -103,7 +157,8 @@ export class WebpayController {
         
         if (transactionResult.rows.length === 0) {
           console.log(`❌ Token no encontrado: ${token_ws}`);
-          return res.redirect(`http://localhost:80/stocks/cancelado?status=cancelled&message=Token de transacción no encontrado`);
+          const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:80';
+          return res.redirect(`${frontendUrl}/stocks/cancelado?status=error&message=Token de transacción no encontrado`);
         }
         
         const transaction = transactionResult.rows[0];
@@ -114,14 +169,15 @@ export class WebpayController {
         if (!confirmResult.success) {
           console.error('❌ Error confirmando:', confirmResult.error);
           
-          // Marcar como fallida (También maneja errores de servidor)
+          // Marcar como fallida
           await client.query(`
             UPDATE webpay_transactions 
             SET status = 'failed', updated_at = NOW() 
             WHERE token_ws = $1
           `, [token_ws]);
           
-          return res.redirect(`http://localhost:80/stocks/${transaction.symbol}?status=error&message=Error al confirmar el pago`);
+          const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:80';
+          return res.redirect(`${frontendUrl}/stocks/${transaction.symbol}?status=error&message=Error al confirmar el pago&request_id=${transaction.request_id}`);
         }
         
         const paymentData = confirmResult.data;
@@ -129,8 +185,8 @@ export class WebpayController {
         // Verificar el estado del pago
         if (paymentData.status === 'AUTHORIZED' && paymentData.response_code === 0) {
           console.log(`✅ Pago autorizado: ${token_ws}`);
-
-          // Procesar compra
+  
+          // Procesar compra SIN WALLET
           const purchaseSuccess = await WebpayController.processSuccessfulPurchase(client, transaction);
           if (purchaseSuccess.success) {
           
@@ -139,9 +195,12 @@ export class WebpayController {
               SET status = 'completed', authorization_code = $1, updated_at = NOW() 
               WHERE token_ws = $2
             `, [paymentData.authorization_code, token_ws]);
+            
             console.log(`✅ Transacción completada: ${transaction.symbol}`);
           
-            return res.redirect(`http://localhost:80/my-purchases?status=success&message=¡Compra de ${transaction.quantity} acciones de ${transaction.symbol} realizada exitosamente!`);
+            // ✅ NUEVA REDIRECCIÓN CORRECTA
+            const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:80';
+            return res.redirect(`${frontendUrl}/stocks/${transaction.symbol}?status=success&message=¡Compra de ${transaction.quantity} acciones de ${transaction.symbol} realizada exitosamente!&request_id=${transaction.request_id}`);
           
           } else {
             await client.query(`
@@ -149,7 +208,9 @@ export class WebpayController {
               SET status = 'failed', updated_at = NOW()
               WHERE token_ws = $1
             `, [token_ws]);
-            return res.redirect(`http://localhost:80/stocks/cancelado?status=cancelled&message=Error procesando la compra después del pago`);
+            
+            const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:80';
+            return res.redirect(`${frontendUrl}/stocks/${transaction.symbol}?status=error&message=Error procesando la compra después del pago&request_id=${transaction.request_id}`);
           }
           
         } else {
@@ -160,7 +221,8 @@ export class WebpayController {
             WHERE token_ws = $1
           `, [token_ws]);
           
-          return res.redirect(`http://localhost:80/stocks/${transaction.symbol}?status=failed&message=Pago rechazado por el banco`);
+          const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:80';
+          return res.redirect(`${frontendUrl}/stocks/${transaction.symbol}?status=failed&message=Pago rechazado por el banco&request_id=${transaction.request_id}`);
         }
       } finally {
         client.release();
@@ -170,7 +232,8 @@ export class WebpayController {
       console.error('💥 Error en webpay return:', error);
       
       // En cualquier error, tratar como cancelación
-      return res.redirect(`http://localhost:80/stocks/cancelado?status=cancelled&message=Error procesando el pago - transacción cancelada`);
+      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:80';
+      return res.redirect(`${frontendUrl}/stocks/cancelado?status=error&message=Error procesando el pago - transacción cancelada`);
     }
   }
 
@@ -178,7 +241,27 @@ export class WebpayController {
     try {
       const { user_id, symbol, quantity, request_id, amount } = transaction;
       
-      console.log(`🔄 Procesando compra exitosa: ${quantity} acciones de ${symbol} para usuario ${user_id}`);
+      const mqttMessage = {
+        request_id: request_id,
+        group_id: process.env.GROUP_ID || "1",
+        quantity: quantity,
+        symbol: symbol,
+        stock_origin: 0,
+        operation: "BUY",
+        deposit_token: transaction.token_ws
+      };
+      
+      try {
+        await axios.post('http://mqtt-client:3000/publish', {
+          topic: 'stocks/requests',
+          message: mqttMessage
+        });
+        
+        console.log(`📡 Solicitud enviada al broker MQTT DESPUÉS de pago exitoso: ${request_id}`);
+      } catch (mqttError) {
+        console.error('❌ Error enviando al broker MQTT:', mqttError);
+        // Continuar con el proceso aunque falle el envío
+      }
       
       // 1. ACTUALIZAR SOLICITUD DE COMPRA (ya existe desde el flujo inicial)
       const updatePurchaseQuery = `
@@ -192,15 +275,8 @@ export class WebpayController {
       await client.query(updatePurchaseQuery, [request_id]);
       console.log(`✅ Solicitud de compra actualizada a ACCEPTED: ${request_id}`);
       
-      // 2. DESCONTAR DINERO DE LA WALLET
-      await client.query(`
-        UPDATE wallet 
-        SET balance = balance - $1,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE user_id = $2
-      `, [amount, user_id]);
-      
-      console.log(`💰 Descontado $${amount} de la wallet del usuario ${user_id}`);
+      // 2. ✅ SIN DESCUENTO DE WALLET - El pago se procesó via WebPay
+      console.log(`💰 Pago de $${amount} procesado exitosamente via WebPay (sin descuento de wallet)`);
       
       // 3. ENVIAR VALIDACIÓN POR MQTT (según enunciado)
       const validationMessage = {
@@ -220,6 +296,20 @@ export class WebpayController {
       } catch (mqttError) {
         console.error('❌ Error enviando validación al broker MQTT:', mqttError);
         // No fallar la compra por esto
+      }
+
+      try {
+        await client.query(`
+          UPDATE stocks 
+          SET quantity = quantity - $1 
+          WHERE symbol = $2
+          AND id = (SELECT id FROM stocks WHERE symbol = $2 ORDER BY timestamp DESC LIMIT 1)
+        `, [quantity, symbol]);
+        
+        console.log(`📦 Acciones reservadas después de pago exitoso: ${quantity} de ${symbol}`);
+      } catch (stockError) {
+        console.error('❌ Error reservando acciones:', stockError);
+        // Continuar con el proceso
       }
       
       // 4. REGISTRAR EVENTO DE COMPRA EXITOSA
@@ -247,7 +337,7 @@ export class WebpayController {
       return { success: false, error: error.message };
     }
   }
-  
+
   /*
   static async handleReturn(req, res) {
     try {
