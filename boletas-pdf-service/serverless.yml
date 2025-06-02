@@ -1,0 +1,98 @@
+service: boletas-pdf-service
+
+frameworkVersion: '3'
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+  region: us-east-1
+  stage: ${opt:stage, 'dev'}
+  
+  # Variables de entorno
+  environment:
+    BUCKET_NAME: ${self:custom.bucketName}
+    GROUP_NAME: "Grupo1" # Cambiar por tu nombre de grupo
+    
+  # Permisos IAM
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - s3:PutObject
+            - s3:PutObjectAcl
+            - s3:GetObject
+          Resource: 
+            - "arn:aws:s3:::${self:custom.bucketName}/*"
+
+custom:
+  bucketName: boletas-pdf-${self:provider.stage}-${random:8}
+
+functions:
+  generateBoleta:
+    handler: src/handlers/generateBoleta.handler
+    timeout: 30
+    memorySize: 512
+    events:
+      - http:
+          path: /generate-boleta
+          method: post
+          cors: true
+    environment:
+      BUCKET_NAME: ${self:custom.bucketName}
+      
+  getBoleta:
+    handler: src/handlers/getBoleta.handler
+    timeout: 10
+    memorySize: 256
+    events:
+      - http:
+          path: /boleta/{boletaId}
+          method: get
+          cors: true
+
+resources:
+  Resources:
+    # Bucket S3 para almacenar las boletas
+    BoletasBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:custom.bucketName}
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: false
+          BlockPublicPolicy: false
+          IgnorePublicAcls: false
+          RestrictPublicBuckets: false
+        CorsConfiguration:
+          CorsRules:
+            - AllowedHeaders:
+                - "*"
+              AllowedMethods:
+                - GET
+                - HEAD
+              AllowedOrigins:
+                - "*"
+                
+    # Política para acceso público de lectura
+    BoletasBucketPolicy:
+      Type: AWS::S3::BucketPolicy
+      Properties:
+        Bucket: !Ref BoletasBucket
+        PolicyDocument:
+          Statement:
+            - Sid: PublicReadGetObject
+              Effect: Allow
+              Principal: "*"
+              Action:
+                - s3:GetObject
+              Resource: !Sub "${BoletasBucket}/*"
+
+plugins:
+  - serverless-offline
+  - serverless-random-string
+
+outputs:
+  BucketName:
+    Value: ${self:custom.bucketName}
+  ApiUrl:
+    Value: !Sub "https://${ApiGatewayRestApi}.execute-api.${AWS::Region}.amazonaws.com/${self:provider.stage}"

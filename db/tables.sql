@@ -83,6 +83,33 @@ CREATE INDEX IF NOT EXISTS idx_purchase_requests_status ON purchase_requests(sta
 -- Actualizar registros existentes que no tengan status
 UPDATE purchase_requests SET status = 'PENDING' WHERE status IS NULL;
 
+-- Agregar columnas para WebPay
+ALTER TABLE purchase_requests ADD COLUMN IF NOT EXISTS webpay_token VARCHAR(255);
+ALTER TABLE purchase_requests ADD COLUMN IF NOT EXISTS session_id VARCHAR(255);
+ALTER TABLE purchase_requests ADD COLUMN IF NOT EXISTS webpay_response JSONB;
+
+-- Índices para mejorar performance
+CREATE INDEX IF NOT EXISTS idx_purchase_requests_webpay_token ON purchase_requests(webpay_token);
+CREATE INDEX IF NOT EXISTS idx_purchase_requests_session_id ON purchase_requests(session_id);
+
+
+-- TABLA PARA BOLETAS (NUEVA)
+CREATE TABLE IF NOT EXISTS boletas (
+    id SERIAL PRIMARY KEY,
+    boleta_id UUID NOT NULL UNIQUE,
+    purchase_id INTEGER REFERENCES purchase_requests(id),
+    user_id INTEGER REFERENCES users(id),
+    download_url VARCHAR(500) NOT NULL,
+    file_name VARCHAR(255) NOT NULL,
+    generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Índices para mejorar performance
+CREATE INDEX IF NOT EXISTS idx_boletas_user_id ON boletas(user_id);
+CREATE INDEX IF NOT EXISTS idx_boletas_purchase_id ON boletas(purchase_id);
+CREATE INDEX IF NOT EXISTS idx_boletas_boleta_id ON boletas(boleta_id);
+
 -- Database connection settings
 \set DB_NAME 'stock_data'
 \set DB_USER 'postgres'

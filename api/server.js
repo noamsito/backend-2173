@@ -7,12 +7,17 @@ import { auth } from 'express-oauth2-jwt-bearer';
 import { v4 as uuidv4 } from 'uuid';
 import { createSyncUserMiddleware } from './auth-integration.js';
 import mqtt from 'mqtt';
+import fetch from 'node-fetch';
 import axios from 'axios';
 import sequelize from './db/db.js';
 
 const Pool = pg.Pool;
 const app = express();
 const port = 3000;
+// ESTO HAY QUE VER QUE ONDA
+const LAMBDA_BOLETAS_URL = process.env.LAMBDA_BOLETAS_URL || 'https://your-api-gateway-url.execute-api.us-east-1.amazonaws.com/dev';
+
+
 
 dotenv.config();
 
@@ -1158,6 +1163,225 @@ app.get('/api/purchases/stats', async (req, res) => {
         });
     }
 });
+
+
+
+/**
+ * Genera una boleta PDF llamando al servicio Lambda
+ * @param {Object} purchaseData - Datos de la compra
+ * @returns {Promise<Object>} - Respuesta del servicio
+ */
+async function generateBoleta(purchaseData) {
+    try {
+        console.log('Generando boleta para:', purchaseData);
+        
+        const response = await fetch(`${LAMBDA_BOLETAS_URL}/generate-boleta`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(purchaseData)
+        });
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`Lambda service error: ${response.status} - ${errorText}`);
+        }
+
+        const result = await response.json();
+        console.log('Boleta generada exitosamente:', result);
+        return result;
+    } catch (error) {
+        console.error('Error generando boleta:', error);
+        throw error;
+    }
+}
+
+// ENDPOINT PARA GENERAR BOLETA (agregar después de los endpoints existentes)
+app.post('/boletas/generate', checkJwt, syncUser, async (req, res) => {
+    try {
+        const { purchaseId } = req.body;
+        
+        if (!purchaseId) {
+            return res.status(400).json({ error: "purchaseId es requerido" });
+        }
+
+        // Obtener datos de la compra
+        const purchaseQuery = `
+            SELECT pr.*, u.name as user_name, u.email as user_email, s.long_name
+            FROM purchase_requests pr
+            JOIN users u ON pr.user_id = u.id
+            LEFT JOIN (
+                SELECT DISTINCT ON (symbol) symbol, long_name
+                FROM stocks
+                ORDER BY symbol, timestamp DESC
+            ) s ON pr.symbol = s.symbol
+            WHERE pr.id = $1 AND pr.user_id = $2 AND pr.status = 'ACCEPTED'
+        `;
+        
+        const purchaseResult = await client.query(purchaseQuery, [purchaseId, req.userId]);
+        
+        if (purchaseResult.rows.length === 0) {
+            return res.status(404).json({ 
+                error: "Compra no encontrada o no fue aceptada" 
+            });
+        }
+        
+        const purchase = purchaseResult.rows[0];
+        
+        // Verificar si ya existe una boleta para esta compra
+        const existingBoletaQuery = `
+            SELECT boleta_id, download_url 
+            FROM boletas 
+            WHERE purchase_id = $1
+        `;
+        
+        const existingResult = await client.query(existingBoletaQuery, [purchaseId]);
+        
+        if (existingResult.rows.length > 0) {
+            return res.json({
+                success: true,
+                message: "Boleta ya existe",
+                ...existingResult.rows[0]
+            });
+        }
+        
+        // Preparar datos para el servicio Lambda
+        const boletaData = {
+            purchaseId: purchase.id,
+            userEmail: purchase.user_email,
+            userName: purchase.user_name,
+            symbol: purchase.symbol,
+            quantity: purchase.quantity,
+            pricePerShare: purchase.price,
+            totalAmount: purchase.price * purchase.quantity,
+            purchaseDate: purchase.created_at,
+            requestId: purchase.request_id
+        };
+        
+        // Generar boleta usando Lambda
+        const lambdaResponse = await generateBoleta(boletaData);
+        
+        // Guardar información de la boleta en la base de datos
+        const insertBoletaQuery = `
+            INSERT INTO boletas (boleta_id, purchase_id, user_id, download_url, file_name, generated_at)
+            VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
+            RETURNING *
+        `;
+        
+        const boletaRecord = await client.query(insertBoletaQuery, [
+            lambdaResponse.boletaId,
+            purchaseId,
+            req.userId,
+            lambdaResponse.downloadUrl,
+            lambdaResponse.fileName
+        ]);
+        
+        res.json({
+            success: true,
+            message: "Boleta generada exitosamente",
+            ...lambdaResponse,
+            dbRecord: boletaRecord.rows[0]
+        });
+        
+    } catch (error) {
+        console.error("Error generando boleta:", error);
+        res.status(500).json({ 
+            error: "Error interno del servidor",
+            details: error.message 
+        });
+    }
+});
+
+// ENDPOINT PARA OBTENER BOLETAS DEL USUARIO (agregar después del endpoint anterior)
+app.get('/boletas/my-boletas', checkJwt, syncUser, async (req, res) => {
+    try {
+        const boletasQuery = `
+            SELECT 
+                b.boleta_id,
+                b.download_url,
+                b.file_name,
+                b.generated_at,
+                pr.symbol,
+                pr.quantity,
+                pr.price,
+                pr.created_at as purchase_date,
+                s.long_name
+            FROM boletas b
+            JOIN purchase_requests pr ON b.purchase_id = pr.id
+            LEFT JOIN (
+                SELECT DISTINCT ON (symbol) symbol, long_name
+                FROM stocks
+                ORDER BY symbol, timestamp DESC
+            ) s ON pr.symbol = s.symbol
+            WHERE b.user_id = $1
+            ORDER BY b.generated_at DESC
+        `;
+        
+        const result = await client.query(boletasQuery, [req.userId]);
+        
+        res.json({
+            success: true,
+            boletas: result.rows
+        });
+        
+    } catch (error) {
+        console.error("Error obteniendo boletas:", error);
+        res.status(500).json({ 
+            error: "Error interno del servidor" 
+        });
+    }
+});
+
+// ENDPOINT PARA OBTENER UNA BOLETA ESPECÍFICA (agregar después del endpoint anterior)
+app.get('/boletas/:boletaId', checkJwt, syncUser, async (req, res) => {
+    try {
+        const { boletaId } = req.params;
+        
+        const boletaQuery = `
+            SELECT 
+                b.boleta_id,
+                b.download_url,
+                b.file_name,
+                b.generated_at,
+                pr.symbol,
+                pr.quantity,
+                pr.price,
+                pr.created_at as purchase_date,
+                s.long_name
+            FROM boletas b
+            JOIN purchase_requests pr ON b.purchase_id = pr.id
+            LEFT JOIN (
+                SELECT DISTINCT ON (symbol) symbol, long_name
+                FROM stocks
+                ORDER BY symbol, timestamp DESC
+            ) s ON pr.symbol = s.symbol
+            WHERE b.boleta_id = $1 AND b.user_id = $2
+        `;
+        
+        const result = await client.query(boletaQuery, [boletaId, req.userId]);
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ 
+                error: "Boleta no encontrada" 
+            });
+        }
+        
+        res.json({
+            success: true,
+            boleta: result.rows[0]
+        });
+        
+    } catch (error) {
+        console.error("Error obteniendo boleta:", error);
+        res.status(500).json({ 
+            error: "Error interno del servidor" 
+        });
+    }
+});
+
+
+
 
 app.listen(port, '0.0.0.0',() => {
     console.log(`Servidor ejecutándose en http://localhost:${port}`);
