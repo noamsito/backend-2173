@@ -190,6 +190,36 @@ export class WebpayController {
             `, [paymentData.authorization_code, token_ws]);
             
             console.log(`✅ Transacción completada: ${transaction.symbol}`);
+
+            // Después de un pago exitoso, generar boleta automáticamente
+            try {
+              const boletaData = {
+                userId: transaction.user_id,
+                userName: user.name, // obtener de la BD
+                userEmail: user.email, // obtener de la BD
+                purchaseId: transaction.request_id,
+                stockSymbol: transaction.symbol,
+                quantity: transaction.quantity,
+                pricePerShare: transaction.amount / transaction.quantity,
+                totalAmount: transaction.amount
+              };
+
+              const boletaResponse = await axios.post(`${process.env.BOLETAS_LAMBDA_URL}/generate-boleta`, boletaData);
+              
+              if (boletaResponse.status === 201) {
+                console.log('✅ Boleta generada:', boletaResponse.data.downloadUrl);
+                
+                // Guardar URL de boleta en la base de datos (opcional)
+                await client.query(`
+                  UPDATE purchase_requests 
+                  SET boleta_url = $1 
+                  WHERE request_id = $2
+                `, [boletaResponse.data.downloadUrl, transaction.request_id]);
+              }
+            } catch (error) {
+              console.error('⚠️ Error generando boleta:', error);
+              // No fallar el pago por esto
+            }
           
             // ✅ NUEVA REDIRECCIÓN CORRECTA
             const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:80';
