@@ -3,7 +3,7 @@ import { S3Client, PutObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s
 import PDFDocument from 'pdfkit';
 import { v4 as uuidv4 } from 'uuid';
 
-const s3Client = new S3Client({ region: process.env.AWS_REGION || 'us-east-1' });
+const s3Client = new S3Client({ region: process.env.AWS_REGION }); // AWS_REGION ya está disponible automáticamente
 
 export const handler = async (event, context) => {
   console.log('🎯 Generando boleta PDF - Event:', JSON.stringify(event, null, 2));

@@ -1,4 +1,7 @@
+# boletas-serverless/serverless.yml - CORREGIDO SIN AWS_REGION
 service: boletas-pdf-grupo1
+
+frameworkVersion: '3'
 
 provider:
   name: aws
@@ -8,10 +11,12 @@ provider:
   memorySize: 512
   timeout: 30
   
+  # Variables de entorno (SIN AWS_REGION)
   environment:
-    BUCKET_NAME: ${self:custom.bucketName}
+    BUCKET_NAME: boletas-grupo1-${self:provider.stage}-${sls:instanceId}
     GRUPO_NOMBRE: "Grupo 1 - IIC2173"
     STAGE: ${self:provider.stage}
+    # AWS_REGION se proporciona automáticamente por AWS Lambda
     
   iamRoleStatements:
     - Effect: Allow
@@ -19,38 +24,38 @@ provider:
         - s3:PutObject
         - s3:PutObjectAcl
         - s3:GetObject
-      Resource: "arn:aws:s3:::${self:custom.bucketName}/*"
-    - Effect: Allow
-      Action:
+        - s3:HeadObject
         - s3:ListBucket
-      Resource: "arn:aws:s3:::${self:custom.bucketName}"
-
-custom:
-  bucketName: boletas-grupo1-${self:provider.stage}
+      Resource: 
+        - "arn:aws:s3:::boletas-grupo1-${self:provider.stage}-${sls:instanceId}"
+        - "arn:aws:s3:::boletas-grupo1-${self:provider.stage}-${sls:instanceId}/*"
 
 functions:
   generateBoleta:
     handler: src/handlers/generateBoleta.handler
+    description: Genera boletas PDF para compras de acciones
     events:
       - http:
           path: /generate-boleta
           method: post
           cors: true
+      - http:
+          path: /generate-boleta
+          method: options
+          cors: true
     
   getBoletaStatus:
-    handler: src/handlers/getBoletaStatus.handler
+    handler: src/handlers/generateBoleta.getBoletaStatusHandler
+    description: Obtiene el estado y URL de descarga de una boleta
     events:
       - http:
           path: /boleta/{boletaId}
           method: get
           cors: true
-          request:
-            parameters:
-              paths:
-                boletaId: true
                 
   healthCheck:
-    handler: src/handlers/healthCheck.handler
+    handler: src/handlers/generateBoleta.healthCheckHandler
+    description: Endpoint de salud para monitoreo
     events:
       - http:
           path: /health
@@ -62,7 +67,7 @@ resources:
     BoletasBucket:
       Type: AWS::S3::Bucket
       Properties:
-        BucketName: ${self:custom.bucketName}
+        BucketName: boletas-grupo1-${self:provider.stage}-${sls:instanceId}
         PublicAccessBlockConfiguration:
           BlockPublicAcls: false
           BlockPublicPolicy: false
@@ -71,13 +76,12 @@ resources:
         CorsConfiguration:
           CorsRules:
             - AllowedHeaders: ['*']
-              AllowedMethods: [GET, HEAD]
+              AllowedMethods: [GET, HEAD, POST]
               AllowedOrigins: ['*']
               MaxAge: 3000
-                
+              
     BoletasBucketPolicy:
       Type: AWS::S3::BucketPolicy
-      DependsOn: BoletasBucket
       Properties:
         Bucket: !Ref BoletasBucket
         PolicyDocument:
@@ -87,22 +91,13 @@ resources:
               Effect: Allow
               Principal: '*'
               Action: 's3:GetObject'
-              Resource: !Join
-                - ''
-                - - 'arn:aws:s3:::'
-                  - !Ref BoletasBucket
-                  - '/boletas/*'
+              Resource: !Sub "${BoletasBucket}/boletas/*"
 
   Outputs:
     ApiGatewayUrl:
       Value: !Sub "https://${ApiGatewayRestApi}.execute-api.${self:provider.region}.amazonaws.com/${self:provider.stage}"
-      Export:
-        Name: ${self:service}-${self:provider.stage}-ApiGatewayUrl
-        
-    BoletasBucketName:
+      Description: "URL base del API Gateway para boletas PDF"
+      
+    BucketName:
       Value: !Ref BoletasBucket
-      Export:
-        Name: ${self:service}-${self:provider.stage}-BoletasBucketName
-
-plugins:
-  - serverless-offline
+      Description: "Nombre del bucket S3 para boletas"

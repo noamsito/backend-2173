@@ -152,16 +152,14 @@
                   "Action": [
                     "s3:PutObject",
                     "s3:PutObjectAcl",
-                    "s3:GetObject"
-                  ],
-                  "Resource": "arn:aws:s3:::boletas-grupo1-dev/*"
-                },
-                {
-                  "Effect": "Allow",
-                  "Action": [
+                    "s3:GetObject",
+                    "s3:HeadObject",
                     "s3:ListBucket"
                   ],
-                  "Resource": "arn:aws:s3:::boletas-grupo1-dev"
+                  "Resource": [
+                    "arn:aws:s3:::boletas-grupo1-dev",
+                    "arn:aws:s3:::boletas-grupo1-dev/*"
+                  ]
                 }
               ]
             }
@@ -190,7 +188,7 @@
           "S3Bucket": {
             "Ref": "ServerlessDeploymentBucket"
           },
-          "S3Key": "serverless/boletas-pdf-grupo1/dev/1748921283136-2025-06-03T03:28:03.136Z/boletas-pdf-grupo1.zip"
+          "S3Key": "serverless/boletas-pdf-grupo1/dev/1748929893575-2025-06-03T05:51:33.575Z/boletas-pdf-grupo1.zip"
         },
         "Handler": "src/handlers/generateBoleta.handler",
         "Runtime": "nodejs18.x",
@@ -222,9 +220,9 @@
           "S3Bucket": {
             "Ref": "ServerlessDeploymentBucket"
           },
-          "S3Key": "serverless/boletas-pdf-grupo1/dev/1748921283136-2025-06-03T03:28:03.136Z/boletas-pdf-grupo1.zip"
+          "S3Key": "serverless/boletas-pdf-grupo1/dev/1748929893575-2025-06-03T05:51:33.575Z/boletas-pdf-grupo1.zip"
         },
-        "Handler": "src/handlers/getBoletaStatus.handler",
+        "Handler": "src/handlers/generateBoleta.getBoletaStatusHandler",
         "Runtime": "nodejs18.x",
         "FunctionName": "boletas-pdf-grupo1-dev-getBoletaStatus",
         "MemorySize": 512,
@@ -254,9 +252,9 @@
           "S3Bucket": {
             "Ref": "ServerlessDeploymentBucket"
           },
-          "S3Key": "serverless/boletas-pdf-grupo1/dev/1748921283136-2025-06-03T03:28:03.136Z/boletas-pdf-grupo1.zip"
+          "S3Key": "serverless/boletas-pdf-grupo1/dev/1748929893575-2025-06-03T05:51:33.575Z/boletas-pdf-grupo1.zip"
         },
-        "Handler": "src/handlers/healthCheck.handler",
+        "Handler": "src/handlers/generateBoleta.healthCheckHandler",
         "Runtime": "nodejs18.x",
         "FunctionName": "boletas-pdf-grupo1-dev-healthCheck",
         "MemorySize": 512,
@@ -279,34 +277,34 @@
         "HealthCheckLogGroup"
       ]
     },
-    "GenerateBoletaLambdaVersionwfnESIibz2EreVhk4zsskXWMS25hkPO2NbJLhFEK1GA": {
+    "GenerateBoletaLambdaVersionF0p8y366DERKGam5AjFEweqIAo2fuA7LhSdFjxLLkEs": {
       "Type": "AWS::Lambda::Version",
       "DeletionPolicy": "Retain",
       "Properties": {
         "FunctionName": {
           "Ref": "GenerateBoletaLambdaFunction"
         },
-        "CodeSha256": "MfJSd02JFgkyRwEpIhpNQ47yFpmrtamxTkDuXBPJgls="
+        "CodeSha256": "+4BljhYFeVteQnPvkyUFA/0bSAO2oU3Yzo6BUrAkJKs="
       }
     },
-    "GetBoletaStatusLambdaVersion2CRuN56VRMuIi57Vvtpe4qJjSqSrKKwSLVBK1eQSVw": {
+    "GetBoletaStatusLambdaVersion3w6JeNzqcQbBwtQWaW8xqmXT1jBjGMiPREFQUgNM": {
       "Type": "AWS::Lambda::Version",
       "DeletionPolicy": "Retain",
       "Properties": {
         "FunctionName": {
           "Ref": "GetBoletaStatusLambdaFunction"
         },
-        "CodeSha256": "MfJSd02JFgkyRwEpIhpNQ47yFpmrtamxTkDuXBPJgls="
+        "CodeSha256": "+4BljhYFeVteQnPvkyUFA/0bSAO2oU3Yzo6BUrAkJKs="
       }
     },
-    "HealthCheckLambdaVersionFWcptj4b9NRYCRJ5L8FSYMvzzWg237oX1ZNmCd9D0": {
+    "HealthCheckLambdaVersionYbyRbBhW3yWJBdlZKu9y7plPc4IwdgYAuu1hbQhhRI": {
       "Type": "AWS::Lambda::Version",
       "DeletionPolicy": "Retain",
       "Properties": {
         "FunctionName": {
           "Ref": "HealthCheckLambdaFunction"
         },
-        "CodeSha256": "MfJSd02JFgkyRwEpIhpNQ47yFpmrtamxTkDuXBPJgls="
+        "CodeSha256": "+4BljhYFeVteQnPvkyUFA/0bSAO2oU3Yzo6BUrAkJKs="
       }
     },
     "ApiGatewayRestApi": {
@@ -396,7 +394,7 @@
         ],
         "RequestParameters": {},
         "Integration": {
-          "Type": "MOCK",
+          "Type": "AWS_PROXY",
           "RequestTemplates": {
             "application/json": "{statusCode:200}"
           },
@@ -413,15 +411,43 @@
                 "application/json": ""
               }
             }
-          ]
+          ],
+          "IntegrationHttpMethod": "POST",
+          "Uri": {
+            "Fn::Join": [
+              "",
+              [
+                "arn:",
+                {
+                  "Ref": "AWS::Partition"
+                },
+                ":apigateway:",
+                {
+                  "Ref": "AWS::Region"
+                },
+                ":lambda:path/2015-03-31/functions/",
+                {
+                  "Fn::GetAtt": [
+                    "GenerateBoletaLambdaFunction",
+                    "Arn"
+                  ]
+                },
+                "/invocations"
+              ]
+            ]
+          }
         },
         "ResourceId": {
           "Ref": "ApiGatewayResourceGenerateDashboleta"
         },
         "RestApiId": {
           "Ref": "ApiGatewayRestApi"
-        }
-      }
+        },
+        "ApiKeyRequired": false
+      },
+      "DependsOn": [
+        "GenerateBoletaLambdaPermissionApiGateway"
+      ]
     },
     "ApiGatewayMethodBoletaBoletaidVarOptions": {
       "Type": "AWS::ApiGateway::Method",
@@ -563,9 +589,7 @@
       "Type": "AWS::ApiGateway::Method",
       "Properties": {
         "HttpMethod": "GET",
-        "RequestParameters": {
-          "method.request.path.boletaId": true
-        },
+        "RequestParameters": {},
         "ResourceId": {
           "Ref": "ApiGatewayResourceBoletaBoletaidVar"
         },
@@ -601,10 +625,7 @@
             ]
           }
         },
-        "MethodResponses": [],
-        "RequestValidatorId": {
-          "Ref": "ApiGatewayBoletaspdfgrupo1RequestValidator"
-        }
+        "MethodResponses": []
       },
       "DependsOn": [
         "GetBoletaStatusLambdaPermissionApiGateway"
@@ -656,18 +677,7 @@
         "HealthCheckLambdaPermissionApiGateway"
       ]
     },
-    "ApiGatewayBoletaspdfgrupo1RequestValidator": {
-      "Type": "AWS::ApiGateway::RequestValidator",
-      "Properties": {
-        "RestApiId": {
-          "Ref": "ApiGatewayRestApi"
-        },
-        "ValidateRequestBody": true,
-        "ValidateRequestParameters": true,
-        "Name": "boletas-pdf-grupo1-dev | Validate request body and querystring parameters"
-      }
-    },
-    "ApiGatewayDeployment1748921271401": {
+    "ApiGatewayDeployment1748929882252": {
       "Type": "AWS::ApiGateway::Deployment",
       "Properties": {
         "RestApiId": {
@@ -680,6 +690,7 @@
         "ApiGatewayMethodBoletaBoletaidVarOptions",
         "ApiGatewayMethodHealthOptions",
         "ApiGatewayMethodGenerateDashboletaPost",
+        "ApiGatewayMethodGenerateDashboletaOptions",
         "ApiGatewayMethodBoletaBoletaidVarGet",
         "ApiGatewayMethodHealthGet"
       ]
@@ -794,69 +805,6 @@
           ]
         }
       }
-    },
-    "BoletasBucket": {
-      "Type": "AWS::S3::Bucket",
-      "Properties": {
-        "BucketName": "boletas-grupo1-dev",
-        "PublicAccessBlockConfiguration": {
-          "BlockPublicAcls": false,
-          "BlockPublicPolicy": false,
-          "IgnorePublicAcls": false,
-          "RestrictPublicBuckets": false
-        },
-        "CorsConfiguration": {
-          "CorsRules": [
-            {
-              "AllowedHeaders": [
-                "*"
-              ],
-              "AllowedMethods": [
-                "GET",
-                "HEAD"
-              ],
-              "AllowedOrigins": [
-                "*"
-              ],
-              "MaxAge": 3000
-            }
-          ]
-        }
-      }
-    },
-    "BoletasBucketPolicy": {
-      "Type": "AWS::S3::BucketPolicy",
-      "DependsOn": [
-        "BoletasBucket"
-      ],
-      "Properties": {
-        "Bucket": {
-          "Ref": "BoletasBucket"
-        },
-        "PolicyDocument": {
-          "Version": "2012-10-17",
-          "Statement": [
-            {
-              "Sid": "PublicReadGetObject",
-              "Effect": "Allow",
-              "Principal": "*",
-              "Action": "s3:GetObject",
-              "Resource": {
-                "Fn::Join": [
-                  "",
-                  [
-                    "arn:aws:s3:::",
-                    {
-                      "Ref": "BoletasBucket"
-                    },
-                    "/boletas/*"
-                  ]
-                ]
-              }
-            }
-          ]
-        }
-      }
     }
   },
   "Outputs": {
@@ -871,7 +819,7 @@
     "GenerateBoletaLambdaFunctionQualifiedArn": {
       "Description": "Current Lambda function version",
       "Value": {
-        "Ref": "GenerateBoletaLambdaVersionwfnESIibz2EreVhk4zsskXWMS25hkPO2NbJLhFEK1GA"
+        "Ref": "GenerateBoletaLambdaVersionF0p8y366DERKGam5AjFEweqIAo2fuA7LhSdFjxLLkEs"
       },
       "Export": {
         "Name": "sls-boletas-pdf-grupo1-dev-GenerateBoletaLambdaFunctionQualifiedArn"
@@ -880,7 +828,7 @@
     "GetBoletaStatusLambdaFunctionQualifiedArn": {
       "Description": "Current Lambda function version",
       "Value": {
-        "Ref": "GetBoletaStatusLambdaVersion2CRuN56VRMuIi57Vvtpe4qJjSqSrKKwSLVBK1eQSVw"
+        "Ref": "GetBoletaStatusLambdaVersion3w6JeNzqcQbBwtQWaW8xqmXT1jBjGMiPREFQUgNM"
       },
       "Export": {
         "Name": "sls-boletas-pdf-grupo1-dev-GetBoletaStatusLambdaFunctionQualifiedArn"
@@ -889,7 +837,7 @@
     "HealthCheckLambdaFunctionQualifiedArn": {
       "Description": "Current Lambda function version",
       "Value": {
-        "Ref": "HealthCheckLambdaVersionFWcptj4b9NRYCRJ5L8FSYMvzzWg237oX1ZNmCd9D0"
+        "Ref": "HealthCheckLambdaVersionYbyRbBhW3yWJBdlZKu9y7plPc4IwdgYAuu1hbQhhRI"
       },
       "Export": {
         "Name": "sls-boletas-pdf-grupo1-dev-HealthCheckLambdaFunctionQualifiedArn"
@@ -919,22 +867,6 @@
       },
       "Export": {
         "Name": "sls-boletas-pdf-grupo1-dev-ServiceEndpoint"
-      }
-    },
-    "ApiGatewayUrl": {
-      "Value": {
-        "Fn::Sub": "https://${ApiGatewayRestApi}.execute-api.us-east-1.amazonaws.com/dev"
-      },
-      "Export": {
-        "Name": "boletas-pdf-grupo1-dev-ApiGatewayUrl"
-      }
-    },
-    "BoletasBucketName": {
-      "Value": {
-        "Ref": "BoletasBucket"
-      },
-      "Export": {
-        "Name": "boletas-pdf-grupo1-dev-BoletasBucketName"
       }
     }
   }
