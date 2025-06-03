@@ -114,3 +114,16 @@ CREATE INDEX IF NOT EXISTS idx_webpay_status ON webpay_transactions(status);
 \set DB_PASSWORD 'tu_password'
 \set DB_HOST 'localhost'
 \set DB_PORT '5432'
+
+-- AGREGAR AL FINAL DE db/tables.sql
+
+-- Columna para tracking de jobs de estimación
+ALTER TABLE purchase_requests 
+ADD COLUMN IF NOT EXISTS estimation_job_id VARCHAR(255);
+
+-- Índice para consultas rápidas de estimaciones
+CREATE INDEX IF NOT EXISTS idx_purchase_requests_estimation_job 
+ON purchase_requests(estimation_job_id);
+
+-- Comentario para tracking
+COMMENT ON COLUMN purchase_requests.estimation_job_id IS 'ID del job de estimación en el sistema de workers';

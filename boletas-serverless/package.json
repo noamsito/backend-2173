@@ -1,0 +1,46 @@
+{
+    "name": "boletas-pdf-serverless",
+    "version": "1.0.0",
+    "description": "Servicio serverless para generación de boletas PDF",
+    "type": "module",
+    "scripts": {
+      "deploy": "serverless deploy",
+      "deploy:dev": "serverless deploy --stage dev",
+      "deploy:prod": "serverless deploy --stage prod",
+      "remove": "serverless remove",
+      "invoke:local": "serverless invoke local",
+      "offline": "serverless offline",
+      "logs": "serverless logs -f generateBoleta -t",
+      "test": "jest",
+      "test:watch": "jest --watch",
+      "lint": "eslint src/",
+      "setup": "npm install && npm run deploy:dev"
+    },
+    "dependencies": {
+      "@aws-sdk/client-s3": "^3.454.0",
+      "pdfkit": "^0.14.0",
+      "uuid": "^9.0.1"
+    },
+    "devDependencies": {
+      "serverless": "^3.38.0",
+      "serverless-offline": "^13.3.0",
+      "serverless-s3-local": "^0.8.0",
+      "serverless-dynamodb-local": "^0.2.40",
+      "jest": "^29.7.0",
+      "eslint": "^8.55.0",
+      "eslint-config-standard": "^17.1.0"
+    },
+    "engines": {
+      "node": ">=18.0.0"
+    },
+    "keywords": [
+      "serverless",
+      "aws",
+      "lambda",
+      "pdf",
+      "boletas",
+      "api-gateway"
+    ],
+    "author": "Grupo 1 - IIC2173",
+    "license": "MIT"
+  }

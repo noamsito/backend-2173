@@ -16,8 +16,49 @@ const Pool = pg.Pool;
 const app = express();
 const port = 3000;
 
+
 dotenv.config();
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:80';
+
+const WORKERS_API_URL = process.env.WORKERS_API_URL || 'http://localhost:3000';
+
+// Función para triggerar estimación después de compra exitosa
+async function triggerEstimationCalculation(userId, purchaseData) {
+    try {
+        console.log(`Triggerando estimación para usuario ${userId}, acción: ${purchaseData.symbol}`);
+        
+        const response = await fetch(`${WORKERS_API_URL}/job`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                userId,
+                stocksPurchased: [
+                    {
+                        symbol: purchaseData.symbol,
+                        quantity: purchaseData.quantity,
+                        purchasePrice: purchaseData.price
+                    }
+                ]
+            })
+        });
+        
+        const result = await response.json();
+        
+        if (response.ok) {
+            console.log(`Estimación triggereada para usuario ${userId}, jobId: ${result.jobId}`);
+            return result.jobId;
+        } else {
+            console.error('Error del JobMaster:', result);
+            return null;
+        }
+    } catch (error) {
+        console.error('Error triggering estimation:', error.message);
+        return null;
+    }
+}
+
 
 // Configuración de la base de datos
 const pool = new Pool({
@@ -1190,54 +1231,102 @@ app.get('/api/purchases/stats', async (req, res) => {
     }
 });
 
-// Agregar endpoint /stats (SIN autenticación para que SystemStatus funcione)
-app.get('/stats', async (req, res) => {
+// AGREGAR ANTES DE: app.listen(port, '0.0.0.0',() => {
+// (línea ~720)
+
+// Endpoint para consultar estimaciones
+app.get('/estimation/:jobId', async (req, res) => {
     try {
-        console.log('🔍 GET /stats - Sin autenticación');
+        const { jobId } = req.params;
         
-        const totalQuery = `SELECT COUNT(*) as total FROM purchase_requests`;
-        const totalResult = await client.query(totalQuery);
+        console.log(`Consultando estimación para job: ${jobId}`);
         
-        const statusQuery = `
-            SELECT status, COUNT(*) as count
-            FROM purchase_requests 
-            GROUP BY status
-        `;
-        const statusResult = await client.query(statusQuery);
+        const response = await fetch(`${WORKERS_API_URL}/job/${jobId}`);
+        const result = await response.json();
         
-        const stats = {
-            total: parseInt(totalResult.rows[0]?.total || 0),
-            processed: 0,
-            pending: 0,
-            failed: 0
-        };
-        
-        statusResult.rows.forEach(row => {
-            const count = parseInt(row.count);
-            switch(row.status?.toUpperCase()) {
-                case 'ACCEPTED':
-                    stats.processed = count;
-                    break;
-                case 'PENDING':
-                    stats.pending = count;
-                    break;
-                case 'REJECTED':
-                case 'ERROR':
-                    stats.failed = count;
-                    break;
-            }
-        });
-        
-        console.log('📊 Stats enviadas:', stats);
-        res.json(stats);
-        
+        if (response.ok) {
+            res.json(result);
+        } else {
+            res.status(response.status).json(result);
+        }
     } catch (error) {
-        console.error('Error obteniendo estadísticas:', error);
-        res.status(500).json({ error: 'Error interno del servidor' });
+        console.error('Error getting estimation:', error);
+        res.status(500).json({ error: 'Error obteniendo estimación' });
     }
 });
 
+// Endpoint para verificar estado del JobMaster (RF04)
+app.get('/workers/health', async (req, res) => {
+    try {
+        const response = await fetch(`${WORKERS_API_URL}/heartbeat`, {
+            timeout: 5000
+        });
+        const result = await response.json();
+        
+        res.json({
+            workers_available: response.ok && result.healthy === true,
+            status: result,
+            timestamp: new Date().toISOString()
+        });
+    } catch (error) {
+        console.error('Error checking workers health:', error);
+        res.json({
+            workers_available: false,
+            error: 'Workers no disponibles',
+            timestamp: new Date().toISOString()
+        });
+    }
+});
 
+// Endpoint para obtener estimación de una compra específica
+app.get('/purchase/:requestId/estimation', checkJwt, syncUser, async (req, res) => {
+    try {
+        const { requestId } = req.params;
+        
+        // Buscar el job_id asociado a esta compra
+        const purchaseQuery = `
+            SELECT estimation_job_id, user_id, symbol, quantity, price 
+            FROM purchase_requests 
+            WHERE request_id = $1 AND user_id = $2
+        `;
+        
+        const purchaseResult = await client.query(purchaseQuery, [requestId, req.userId]);
+        
+        if (purchaseResult.rows.length === 0) {
+            return res.status(404).json({ error: 'Compra no encontrada' });
+        }
+        
+        const purchase = purchaseResult.rows[0];
+        
+        if (!purchase.estimation_job_id) {
+            return res.json({
+                status: 'no_estimation',
+                message: 'Estimación no generada para esta compra'
+            });
+        }
+        
+        // Consultar el estado de la estimación
+        const response = await fetch(`${WORKERS_API_URL}/job/${purchase.estimation_job_id}`);
+        const estimationResult = await response.json();
+        
+        if (response.ok) {
+            res.json({
+                ...estimationResult,
+                purchase_info: {
+                    symbol: purchase.symbol,
+                    quantity: purchase.quantity,
+                    price: purchase.price
+                }
+            });
+        } else {
+            res.status(response.status).json(estimationResult);
+        }
+        
+    } catch (error) {
+        console.error('Error getting purchase estimation:', error);
+        res.status(500).json({ error: 'Error obteniendo estimación de compra' });
+    }
+});
 app.listen(port, '0.0.0.0',() => {
     console.log(`Servidor ejecutándose en http://localhost:${port}`);
 });
