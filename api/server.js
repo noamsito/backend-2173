@@ -1,4 +1,4 @@
-import express from 'express';
+import express, { request } from 'express';
 import cors from 'cors';
 import pg from 'pg';
 import dotenv from 'dotenv';
@@ -9,6 +9,8 @@ import { createSyncUserMiddleware } from './auth-integration.js';
 import mqtt from 'mqtt';
 import axios from 'axios';
 import sequelize from './db/db.js';
+import { TransbankService } from './src/services/webpayService.js';
+import webpayRoutes from './src/routes/webpayRoutes.js';
 
 const Pool = pg.Pool;
 const app = express();
@@ -16,6 +18,7 @@ const port = 3000;
 
 
 dotenv.config();
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:80';
 
 const WORKERS_API_URL = process.env.WORKERS_API_URL || 'http://localhost:3000';
 
@@ -76,6 +79,9 @@ const checkJwt = auth({
     issuerBaseURL: `https://${process.env.AUTH0_DOMAIN}` || 'https://dev-ouxdigl1l6bn6n3r.us.auth0.com/',
     tokenSigningAlg: 'RS256'
 });
+
+// Webpay routes
+app.use('/webpay', webpayRoutes);
 
 // CORS configuration
 app.use(cors({
@@ -620,6 +626,7 @@ app.get('/wallet/balance', checkJwt, syncUser, async (req, res) => {
 // ENDPOINTS DE COMPRA DE ACCIONES ===========================================
 
 // Comprar acciones (versión mejorada)
+// Comprar acciones (versión corregida para WebPay)
 app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
     try {
         const { symbol, quantity } = req.body;
@@ -629,7 +636,6 @@ app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
         }
         
         console.log(`Procesando solicitud de compra: ${quantity} acciones de ${symbol}`);
-        
         
         // Obtener precio actual y disponibilidad de la acción
         const stockQuery = `
@@ -652,23 +658,55 @@ app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
         }
         
         const totalCost = stock.price * quantity;
-        
-        // Verificar saldo en billetera
-        const walletQuery = `
-            SELECT balance FROM wallet 
-            WHERE user_id = $1
-        `;
-        
-        const walletResult = await client.query(walletQuery, [req.userId]);
-        
-        if (walletResult.rows.length === 0 || walletResult.rows[0].balance < totalCost) {
-            return res.status(400).json({ error: "Fondos insuficientes" });
-        }
+
+        // ✅ SIN VERIFICACIÓN DE WALLET - El pago se valida via WebPay
+        console.log(`💰 Total a pagar: $${totalCost} (será validado por WebPay)`);
         
         // Generar UUID para la solicitud
         const requestId = uuidv4();
+        const shortRequestId = requestId.split('-')[0]; 
+        const buyOrder = `${symbol}-${shortRequestId}`;
+        const sessionId = `session-${req.userId}-${Date.now()}`;
+        const returnUrl = process.env.TRANSBANK_RETURN_URL || 'http://localhost:3000/webpay/return';
+
+        // 1. CREAR TRANSACCIÓN WEBPAY
+        const webpayResult = await TransbankService.createTransaction(
+            buyOrder,
+            sessionId,
+            totalCost,
+            returnUrl
+        );
         
-        // Crear solicitud de compra en la base de datos
+        if (!webpayResult.success) {
+            console.error("Error al crear transacción webpay:", webpayResult.error);
+            return res.status(500).json({
+                error: "Error al procesar el pago",
+                details: webpayResult.error
+            });
+        }
+
+        console.log(`Transacción WebPay creada exitosamente: ${webpayResult.token}`);
+
+        // 2. GUARDAR TRANSACCIÓN EN BASE DE DATOS
+        const webpayTransactionQuery = `
+            INSERT INTO webpay_transactions
+            (user_id, buy_order, session_id, token_ws, amount, status, symbol, quantity, request_id, created_at)
+            VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7, $8, NOW())
+            RETURNING id
+        `;
+        
+        await client.query(webpayTransactionQuery, [
+            req.userId,
+            buyOrder,
+            sessionId,
+            webpayResult.token,
+            totalCost,
+            symbol,
+            quantity,
+            requestId
+        ]);
+
+        // 3. CREAR SOLICITUD DE COMPRA EN PURCHASE_REQUESTS
         const purchaseQuery = `
             INSERT INTO purchase_requests 
             (request_id, user_id, symbol, quantity, price, status) 
@@ -683,87 +721,90 @@ app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
             quantity, 
             stock.price
         ]);
-        
-        console.log(`Solicitud de compra registrada: ID ${requestId}`);
-        
-        // Reservar temporalmente la cantidad de acciones
-        await client.query(`
-            UPDATE stocks 
-            SET quantity = quantity - $1 
-            WHERE id = $2
-        `, [quantity, stock.id]);
-        
-        console.log(`Reservadas ${quantity} acciones de ${symbol} temporalmente`);
-        
-        // Crear el mensaje para el broker MQTT
-        const message = {
-            request_id: requestId,
-            group_id: GROUP_ID,
-            quantity: quantity,
-            symbol: symbol,
-            operation: "BUY"
-        };
-        
-        // Publicar solicitud de compra al broker MQTT
-        await axios.post('http://mqtt-client:3000/publish', {
-            topic: 'stocks/requests',
-            message: message
-        });
-        
-        console.log(`Solicitud enviada al broker MQTT: ${requestId}`);
-        
-        // Registrar evento
+
+        // 4. RESERVAR ACCIONES TEMPORALMENTE
+        console.log(`📊 Acciones disponibles: ${stock.quantity}, solicitadas: ${quantity}`);
+
+        console.log(`💾 Solicitud de compra creada: ${requestId}, esperando confirmación de pago WebPay`);
+
+        // 6. REGISTRAR EVENTO
         await logEvent('PURCHASE_REQUEST', {
             request_id: requestId,
             user_id: req.userId,
             symbol: symbol,
             quantity: quantity,
             price: stock.price,
-            group_id: GROUP_ID
+            group_id: GROUP_ID,
+            webpay_token: webpayResult.token,
+            deposit_token: webpayResult.token
         });
         
-        res.json({ 
-            status: "success", 
-            message: "Solicitud de compra enviada", 
-            request_id: requestId 
+        // 7. RETORNAR DATOS PARA REDIRECCIÓN A WEBPAY
+        res.json({
+            message: "Transacción de pago creada exitosamente",
+            requiresPayment: true,
+            webpayUrl: webpayResult.url,
+            webpayToken: webpayResult.token,
+            request_id: requestId
         });
+        
     } catch (error) {
         console.error("Error procesando compra:", error);
         res.status(500).json({ error: "Error interno del servidor" });
     }
 });
 
+
+
 // Obtener compras del usuario (versión mejorada)
 app.get('/purchases', checkJwt, syncUser, async (req, res) => {
     try {
         // Obtener compras del usuario con una consulta mejorada que evita duplicados
         const purchasesQuery = `
-            WITH latest_stocks AS (
-                SELECT DISTINCT ON (symbol) symbol, long_name, price, timestamp
-                FROM stocks
-                ORDER BY symbol, timestamp DESC
-            )
-            SELECT 
-                pr.id, 
-                pr.request_id, 
-                pr.symbol, 
-                pr.quantity, 
-                pr.price, 
-                pr.status, 
-                pr.reason,
-                pr.created_at,
-                ls.long_name
-            FROM purchase_requests pr
-            JOIN latest_stocks ls ON pr.symbol = ls.symbol
-            WHERE pr.user_id = $1
-            ORDER BY pr.created_at DESC
+        WITH latest_stocks AS (
+            SELECT DISTINCT ON (symbol) symbol, long_name, price, timestamp
+            FROM stocks
+            ORDER BY symbol, timestamp DESC
+        )
+        SELECT 
+            pr.id, 
+            pr.request_id, 
+            pr.symbol, 
+            pr.quantity, 
+            pr.price as price_at_purchase, 
+            pr.status, 
+            pr.reason,
+            pr.created_at,
+            ls.long_name
+        FROM purchase_requests pr
+        JOIN latest_stocks ls ON pr.symbol = ls.symbol
+        WHERE pr.user_id = $1
+        AND pr.status IN ('PENDING', 'ACCEPTED')
+        ORDER BY pr.created_at DESC
         `;
-        
+
+        const result = await client.query(purchasesQuery, [req.userId]);
+
+        const purchases = result.rows.map(row => ({
+            id: row.id,
+            request_id: row.request_id,
+            symbol: row.symbol,
+            quantity: row.quantity,
+            priceAtPurchase: row.price_at_purchase,  // ← MAPEAR NOMBRE
+            status: row.status,
+            reason: row.reason,
+            createdAt: row.created_at,              // ← MAPEAR NOMBRE
+            longName: row.long_name
+        }));
+
+        res.json(purchases);
+        /*
         const purchasesResult = await client.query(purchasesQuery, [req.userId]);
         
         console.log(`Obtenidas ${purchasesResult.rows.length} compras para el usuario ${req.userId}`);
         
         res.json({ data: purchasesResult.rows });
+        */
     } catch (error) {
         console.error("Error obteniendo compras:", error);
         res.status(500).json({ error: "Error interno del servidor" });
@@ -799,107 +840,101 @@ app.get('/debug/check-duplicates', async (req, res) => {
     }
 });
 
-// Validación de compra (para las respuestas del broker)
+
+// REEMPLAZAR TODO EL ENDPOINT /purchase-validation (líneas 936-1024) CON ESTE:
 app.post('/purchase-validation', async (req, res) => {
     try {
-        const validation = req.body;
-        
-        if (!validation.request_id) {
-            return res.status(400).json({ error: "Datos de validación inválidos" });
-        }
-        
-        // Registrar para depuración
-        console.log(`Procesando validación para request_id: ${validation.request_id}, status: ${validation.status}`);
-        
-        // Verificar si ya hemos procesado una validación final para este request_id
-        const checkQuery = `
-            SELECT status 
-            FROM purchase_requests 
-            WHERE request_id = $1
-            AND status IN ('ACCEPTED', 'REJECTED')
-        `;
-        
-        const checkResult = await client.query(checkQuery, [validation.request_id]);
-        
-        // Si ya existe una validación final, no procesar esta
-        if (checkResult.rows.length > 0) {
-            console.log(`Validación duplicada para request_id ${validation.request_id}, ignorando`);
-            return res.json({ 
-                status: "ignored", 
-                message: `La solicitud ${validation.request_id} ya ha sido validada con estado ${checkResult.rows[0].status}`
-            });
-        }
-        
-        // Actualizar estado de la solicitud de compra
-        const updateQuery = `
-            UPDATE purchase_requests 
-            SET status = $1, 
-                reason = $2,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE request_id = $3
-            RETURNING user_id, symbol, quantity, price
-        `;
-        
-        const updateResult = await client.query(updateQuery, [
-            validation.status,
-            validation.reason || null,
-            validation.request_id
-        ]);
-        
-        if (updateResult.rows.length === 0) {
-            console.log(`No se encontró la solicitud ${validation.request_id} en nuestra base de datos`);
-            return res.status(404).json({ error: "Solicitud de compra no encontrada" });
-        }
-        
-        const purchase = updateResult.rows[0];
-        const totalCost = purchase.price * purchase.quantity;
-        
-        // Registrar evento de validación
-        await logEvent('PURCHASE_VALIDATION', {
-            request_id: validation.request_id,
-            status: validation.status,
-            reason: validation.reason,
-            symbol: purchase.symbol,
-            quantity: purchase.quantity,
-            price: purchase.price
+      const validation = req.body;
+  
+      console.log(`🔍 VALIDACIÓN RECIBIDA:`, validation);
+      
+      if (!validation.request_id) {
+        return res.status(400).json({ error: "Datos de validación inválidos" });
+      }
+      
+      // Verificar si es una transacción WebPay
+      const webpayCheck = await client.query(`
+        SELECT COUNT(*) as count FROM webpay_transactions 
+        WHERE request_id = $1
+      `, [validation.request_id]);
+      
+      const isWebpayTransaction = webpayCheck.rows[0].count > 0;
+      
+      if (isWebpayTransaction) {
+        console.log(`🔍 Validación de WebPay detectada para ${validation.request_id}, ignorando (ya procesada por WebPay)`);
+        return res.json({ 
+          status: "ignored", 
+          message: "Transacción WebPay ya procesada directamente" 
         });
-        
-        if (validation.status === 'ACCEPTED') {
-            await client.query(`
-                UPDATE wallet 
-                SET balance = balance - $1,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE user_id = $2
-            `, [totalCost, purchase.user_id]);
-            
-            console.log(`Compra aceptada: descontado $${totalCost} de la wallet del usuario ${purchase.user_id}`);
-            
-            // 🆕 NUEVO: Triggerar estimación
-            const jobId = await triggerEstimationCalculation(purchase.user_id, {
-                symbol: purchase.symbol,
-                quantity: purchase.quantity,
-                price: purchase.price
-            });
-            
-            if (jobId) {
-                // Guardar jobId en la base de datos para seguimiento
-                try {
-                    await client.query(`
-                        UPDATE purchase_requests 
-                        SET estimation_job_id = $1 
-                        WHERE request_id = $2
-                    `, [jobId, validation.request_id]);
-                    console.log(`Job ID ${jobId} guardado para request ${validation.request_id}`);
-                } catch (updateError) {
-                    console.error('Error guardando job ID:', updateError);
-                }
-            }
-        }
+      }
+      
+      // Registrar para depuración
+      console.log(`Procesando validación para request_id: ${validation.request_id}, status: ${validation.status}`);
+      
+      // Verificar si ya hemos procesado una validación final para este request_id
+      const checkQuery = `
+        SELECT status 
+        FROM purchase_requests 
+        WHERE request_id = $1
+      `;
+      
+      const checkResult = await client.query(checkQuery, [validation.request_id]);
+  
+      console.log(`🔍 Estado actual encontrado:`, checkResult.rows);
+      
+      // Si ya existe una validación final, no procesar esta
+      if (checkResult.rows.length > 0 && ['ACCEPTED', 'REJECTED'].includes(checkResult.rows[0].status)) {
+        console.log(`Validación duplicada para request_id ${validation.request_id}, ignorando`);
+        return res.json({ 
+          status: "ignored", 
+          message: `La solicitud ${validation.request_id} ya ha sido validada con estado ${checkResult.rows[0].status}`
+        });
+      }
+  
+      console.log(`🔄 Actualizando request_id ${validation.request_id} a status: ${validation.status}`);
+      
+      // Actualizar estado de la solicitud de compra
+      const updateQuery = `
+        UPDATE purchase_requests 
+        SET status = $1, 
+            reason = $2,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE request_id = $3
+        RETURNING user_id, symbol, quantity, price
+      `;
+      
+      const updateResult = await client.query(updateQuery, [
+        validation.status,
+        validation.reason || null,
+        validation.request_id
+      ]);
+      
+      if (updateResult.rows.length === 0) {
+        console.log(`No se encontró la solicitud ${validation.request_id} en nuestra base de datos`);
+        return res.status(404).json({ error: "Solicitud de compra no encontrada" });
+      }
+      
+      const purchase = updateResult.rows[0];
+      
+      // Registrar evento de validación
+      await logEvent('PURCHASE_VALIDATION', {
+        request_id: validation.request_id,
+        status: validation.status,
+        reason: validation.reason,
+        symbol: purchase.symbol,
+        quantity: purchase.quantity,
+        price: purchase.price
+      });
+      
+      // NOTA: No se maneja wallet ni stocks aquí para transacciones WebPay
+      // porque ya se procesan directamente en webpayController.js
+      
+      res.json({ status: "success" });
     } catch (error) {
-        console.error("Error procesando validación:", error);
-        res.status(500).json({ error: "Error interno del servidor" });
+      console.error("Error procesando validación de compra:", error);
+      res.status(500).json({ error: "Error interno del servidor" });
     }
-});
+  });
 
 // Procesar compra externa (de otros grupos)
 // Asegúrate de que esta ruta exista exactamente así
@@ -1292,7 +1327,6 @@ app.get('/purchase/:requestId/estimation', checkJwt, syncUser, async (req, res) 
         res.status(500).json({ error: 'Error obteniendo estimación de compra' });
     }
 });
-
 app.listen(port, '0.0.0.0',() => {
     console.log(`Servidor ejecutándose en http://localhost:${port}`);
 });

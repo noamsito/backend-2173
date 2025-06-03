@@ -16,8 +16,10 @@ const options = {
     reconnectPeriod: 1000, // Reconexión cada 1 segundo si se pierde la conexión
 };
 
+
 const UPDATES_TOPIC = "stocks/updates";
 const REQUESTS_TOPIC = "stocks/requests";
+const VALIDATION_TOPIC = 'stocks/validation';
 const GROUP_ID = process.env.GROUP_ID || "1"; // Cambiar por tu ID de grupo
 
 console.log("Conectando a MQTT broker:", options);
@@ -44,7 +46,8 @@ client.on("connect", () => {
     reconnectCount = 0; // Resetear contador de reconexión
 
     // Suscribir a ambos canales
-    client.subscribe([UPDATES_TOPIC, REQUESTS_TOPIC], (err) => {
+    
+    client.subscribe([UPDATES_TOPIC, REQUESTS_TOPIC, VALIDATION_TOPIC], (err) => {
         if (!err) {
             console.log("Suscrito a:", UPDATES_TOPIC, REQUESTS_TOPIC);
         } else {
@@ -63,8 +66,61 @@ client.on("message", (topic, message) => {
     } else if (topic === REQUESTS_TOPIC) {
         // Manejo de solicitudes y validaciones de compra
         handlePurchaseMessage(messageStr);
+    } else if (topic === VALIDATION_TOPIC) {
+        handleValidationMessage(messageStr);
     }
 });
+
+async function handleValidationMessage(messageStr) {
+    try {
+        const data = JSON.parse(messageStr);
+
+        if (data.request_id) {
+            console.log(`✅ Recibida validación para request_id: ${data.request_id}, status: ${data.status}`);
+        }
+
+        // Verificar si la solicitud pertenece a nuestro grupo
+        if (isOurRequest(data.request_id)) {
+            console.log(`Verificación de propiedad para request_id ${data.request_id}: Es nuestra`);
+            console.log(`Procesando respuesta para nuestra solicitud: ${data.request_id}, status: ${data.status}`);
+
+            processValidation(data)
+        }
+    } catch (err) {
+        console.error("Error procesando mensaje de validación:", err);
+    }
+}
+
+// Agregar esta función después de handleValidationMessage
+async function processValidation(validationData) {
+    try {
+        // Para validaciones de compra
+        if (validationData.request_id) {
+            console.log(`Procesando validación para request_id: ${validationData.request_id}, status: ${validationData.status}`);
+            
+            // Llamar al endpoint de validación
+            const endpointUrl = "http://api:3000/purchase-validation";
+            
+            await fetchWithRetry(endpointUrl, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(validationData)
+            }, "validación de compra");
+        }
+        // Si se añaden otros tipos de validación en el futuro, se pueden procesar aquí
+    } catch (err) {
+        console.error("Error procesando validación:", err);
+    }
+
+}
+
+// Agregar esta función si no existe
+function isOurRequest(requestId) {
+    // Esta función puede usar la misma lógica que checkIfRequestBelongsToUs
+    // pero para mayor eficiencia, podríamos mantener un registro local
+    // de los request_id que hemos generado
+    return checkIfRequestBelongsToUs(requestId);
+}
 
 async function handleStockUpdate(topic, messageStr) {
     try {
@@ -154,13 +210,8 @@ async function handlePurchaseMessage(messageStr) {
                 // Solo procesamos respuestas finales (ACCEPTED, REJECTED, error)
                 // y evitamos procesar las confirmaciones de recepción (OK)
                 if (purchaseData.status !== 'OK') {
-                    const endpointUrl = "http://api:3000/purchase-validation";
-                    
-                    await fetchWithRetry(endpointUrl, {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify(purchaseData)
-                    }, "validación de compra");
+                    console.log(`🔄 Reenviando respuesta por stocks/validation: ${purchaseData.request_id}, status: ${purchaseData.status}`);
+                    client.publish(VALIDATION_TOPIC, JSON.stringify(purchaseData));
                 } else {
                     console.log(`Confirmación de recepción para nuestra solicitud: ${purchaseData.request_id}`);
                 }
@@ -177,12 +228,16 @@ async function handlePurchaseMessage(messageStr) {
                 return;
             }
             
+            // NUEVO: Verificar si tiene deposit_token (solicitudes con WebPay)
+            if (purchaseData.deposit_token) {
+                console.log(`Solicitud con WebPay detectada: ${purchaseData.request_id}, deposit_token: ${purchaseData.deposit_token}`);
+            }
+            
             // Verificamos si la solicitud es de otro grupo (no nuestra)
             if (String(purchaseData.group_id) !== String(GROUP_ID)) {
                 console.log(`Compra externa del grupo ${purchaseData.group_id} detectada para ${purchaseData.symbol}`);
                 
                 // Reenviar la compra externa a nuestra API para actualizar inventario
-                // La API se encargará de registrar el evento de compra externa
                 const endpointUrl = "http://api:3000/external-purchase";
                 
                 await fetchWithRetry(endpointUrl, {
@@ -203,6 +258,7 @@ async function handlePurchaseMessage(messageStr) {
         console.error("Error procesando mensaje:", err);
     }
 }
+
 
 // Nueva función para verificar si un request_id pertenece a nuestro grupo
 async function checkIfRequestBelongsToUs(requestId) {

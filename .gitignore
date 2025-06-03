@@ -1,2 +1,12 @@
+# Dependencias
+node_modules/
+*/node_modules/
+**/node_modules/
+
+# Variables de entorno
 .env
 credentials.secret
+
+# Otros
+.DS_Store
+*.log
