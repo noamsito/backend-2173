@@ -13,17 +13,16 @@ import { TransbankService } from './src/services/webpayService.js';
 import webpayRoutes from './src/routes/webpayRoutes.js';
 import { corsOptions, customCorsMiddleware, webpayCorsmiddleware } from './cors-configuration.js';
 
-// Aplicar CORS global
+const Pool = pg.Pool;
+const app = express();
+const port = 3000;
+
+// ✅ APLICAR CORS DESPUÉS DE CREAR LA INSTANCIA DE EXPRESS
 app.use(cors(corsOptions));
 app.use(customCorsMiddleware);
 
 // Para rutas específicas de WebPay
 app.use('/webpay', webpayCorsmiddleware);
-
-const Pool = pg.Pool;
-const app = express();
-const port = 3000;
-
 
 dotenv.config();
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:80';
@@ -67,7 +66,6 @@ async function triggerEstimationCalculation(userId, purchaseData) {
     }
 }
 
-
 // Configuración de la base de datos
 const pool = new Pool({
     user: process.env.DB_USER || 'postgres',
@@ -88,19 +86,6 @@ const checkJwt = auth({
     tokenSigningAlg: 'RS256'
 });
 
-// Webpay routes
-// app.use('/webpay', webpayRoutes);
-
-// CORS configuration
-app.use(cors({
-    origin: ['http://localhost:80', 'http://localhost', 'http://localhost:5173', 
-        process.env.FRONTEND_URL, 'http://antonioescobar.lat',
-        'http://frontend-grupo1-iic2173.s3-website-us-east-1.amazonaws.com/',
-        'http://frontend-grupo1-iic2173.s3-website-us-east-1.amazonaws.com'].filter(Boolean),
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization']
-}));
 
 // Middleware de debugging
 app.use('/api/purchases', (req, res, next) => {
@@ -111,7 +96,6 @@ app.use('/api/purchases', (req, res, next) => {
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use('/api/purchases', purchaseRoutes);
-
 
 const client = await pool.connect();
 
