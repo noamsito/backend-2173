@@ -1,0 +1,157 @@
+# api-gateway-setup.yml
+# Configuración para API Gateway con dominios personalizados
+
+# Configuración para AWS API Gateway
+Resources:
+  # Certificado SSL para dominios personalizados
+  SSLCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: antonioescobar.lat
+      SubjectAlternativeNames:
+        - api.antonioescobar.lat
+        - boletas-api.antonioescobar.lat
+        - "*.antonioescobar.lat"
+      ValidationMethod: DNS
+      
+  # API Gateway para el backend principal
+  MainApiGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: backend-api-gateway
+      Description: API Gateway para backend principal
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      BinaryMediaTypes:
+        - "application/pdf"
+        - "application/octet-stream"
+        - "image/*"
+        
+  # Dominio personalizado para API principal
+  MainDomainName:
+    Type: AWS::ApiGateway::DomainName
+    Properties:
+      DomainName: api.antonioescobar.lat
+      RegionalCertificateArn: !Ref SSLCertificate
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+          
+  # Dominio personalizado para API de boletas
+  BoletasDomainName:
+    Type: AWS::ApiGateway::DomainName
+    Properties:
+      DomainName: boletas-api.antonioescobar.lat
+      RegionalCertificateArn: !Ref SSLCertificate
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+# Configuración nginx para instancia EC2 (si usas nginx como proxy)
+---
+# /etc/nginx/sites-available/api
+# Configuración nginx para API Gateway
+
+server {
+    listen 80;
+    server_name api.antonioescobar.lat;
+    
+    # Redirigir HTTP a HTTPS
+    return 301 https://$server_name$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name api.antonioescobar.lat;
+    
+    # Certificados SSL
+    ssl_certificate /etc/letsencrypt/live/antonioescobar.lat/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/antonioescobar.lat/privkey.pem;
+    
+    # Configuración SSL
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-RSA-AES256-GCM-SHA512:DHE-RSA-AES256-GCM-SHA512;
+    ssl_prefer_server_ciphers off;
+    
+    # Headers de seguridad
+    add_header X-Frame-Options DENY;
+    add_header X-Content-Type-Options nosniff;
+    add_header X-XSS-Protection "1; mode=block";
+    
+    # CORS Headers
+    add_header Access-Control-Allow-Origin "https://antonioescobar.lat" always;
+    add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS" always;
+    add_header Access-Control-Allow-Headers "Accept, Authorization, Cache-Control, Content-Type, DNT, If-Modified-Since, Keep-Alive, Origin, User-Agent, X-Requested-With" always;
+    add_header Access-Control-Allow-Credentials true always;
+    
+    # Manejar preflight requests
+    if ($request_method = 'OPTIONS') {
+        add_header Access-Control-Allow-Origin "https://antonioescobar.lat";
+        add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS";
+        add_header Access-Control-Allow-Headers "Accept, Authorization, Cache-Control, Content-Type, DNT, If-Modified-Since, Keep-Alive, Origin, User-Agent, X-Requested-With";
+        add_header Access-Control-Max-Age 1728000;
+        add_header Content-Type "text/plain; charset=utf-8";
+        add_header Content-Length 0;
+        return 204;
+    }
+    
+    # Proxy al backend en EC2
+    location / {
+        proxy_pass http://localhost:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_cache_bypass $http_upgrade;
+        
+        # Timeouts
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
+    }
+    
+    # WebSocket support
+    location /ws {
+        proxy_pass http://localhost:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+    
+    # Configuración específica para WebPay
+    location /webpay/ {
+        proxy_pass http://localhost:3000/webpay/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        
+        # No añadir CORS headers aquí, los maneja el backend
+    }
+}
+
+# Configuración para boletas-api
+server {
+    listen 443 ssl http2;
+    server_name boletas-api.antonioescobar.lat;
+    
+    ssl_certificate /etc/letsencrypt/live/antonioescobar.lat/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/antonioescobar.lat/privkey.pem;
+    
+    # Proxy a AWS Lambda (API Gateway)
+    location / {
+        proxy_pass https://api.antonioescobar.lat.amazonaws.com/dev;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}

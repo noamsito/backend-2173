@@ -3,7 +3,7 @@ import axios from 'axios';
 
 class BoletaService {
   constructor() {
-    this.lambdaUrl = process.env.BOLETAS_LAMBDA_URL || 'https://tu-api-gateway-url.amazonaws.com/dev';
+    this.lambdaUrl = process.env.BOLETAS_LAMBDA_URL || 'https://api.antonioescobar.amazonaws.com/dev';
     this.timeout = 30000; // 30 segundos
   }
 

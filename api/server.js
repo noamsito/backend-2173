@@ -11,6 +11,14 @@ import axios from 'axios';
 import sequelize from './db/db.js';
 import { TransbankService } from './src/services/webpayService.js';
 import webpayRoutes from './src/routes/webpayRoutes.js';
+import { corsOptions, customCorsMiddleware, webpayCorsmiddleware } from './cors-configuration.js';
+
+// Aplicar CORS global
+app.use(cors(corsOptions));
+app.use(customCorsMiddleware);
+
+// Para rutas específicas de WebPay
+app.use('/webpay', webpayCorsmiddleware);
 
 const Pool = pg.Pool;
 const app = express();
@@ -81,7 +89,7 @@ const checkJwt = auth({
 });
 
 // Webpay routes
-app.use('/webpay', webpayRoutes);
+// app.use('/webpay', webpayRoutes);
 
 // CORS configuration
 app.use(cors({
