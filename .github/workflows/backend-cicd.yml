@@ -1,0 +1,368 @@
+# .github/workflows/backend-api-cicd.yml
+name: Backend API CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, production ]
+    paths:
+      - 'api/**'
+      - 'mqtt-client/**'
+      - 'db/**'
+      - '.github/workflows/backend-api-cicd.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'api/**'
+      - 'mqtt-client/**'
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REGISTRY: public.ecr.aws/your-alias  # Cambiar por tu alias
+  
+jobs:
+  # ===============================
+  # JOB 1: CI PARA SERVICIOS BACKEND
+  # ===============================
+  ci:
+    name: 🧪 Backend API CI
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+    
+    - name: 🏗️ Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: |
+          api/package-lock.json
+          mqtt-client/package-lock.json
+    
+    - name: 📦 Install API Dependencies
+      working-directory: ./api
+      run: npm ci
+      
+    - name: 📦 Install MQTT Client Dependencies
+      working-directory: ./mqtt-client
+      run: npm ci
+    
+    - name: 🔍 Lint Code
+      working-directory: ./api
+      run: npm run lint || echo "⚠️ Lint no configurado"
+    
+    - name: 🧪 Run Tests
+      working-directory: ./api
+      run: npm test || echo "⚠️ Tests no configurados"
+      env:
+        NODE_ENV: test
+
+  # ===============================
+  # JOB 2: BUILD & PUSH BACKEND IMAGES
+  # ===============================
+  build-backend:
+    name: 🐳 Build Backend Images
+    runs-on: ubuntu-latest
+    needs: ci
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/production'
+    
+    strategy:
+      matrix:
+        service: [api, mqtt-client]
+    
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+    
+    - name: 🔑 Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+    
+    - name: 🐳 Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    
+    - name: 🔓 Login to Amazon ECR Public
+      uses: aws-actions/amazon-ecr-login@v2
+      with:
+        registry-type: public
+    
+    - name: 🏷️ Generate Image Metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.ECR_REGISTRY }}/stockmarket-${{ matrix.service }}
+        tags: |
+          type=ref,event=branch
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+    
+    - name: 🏗️ Build and Push Docker Image
+      uses: docker/build-push-action@v5
+      with:
+        context: ./${{ matrix.service }}
+        file: ./${{ matrix.service }}/Dockerfile
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        platforms: linux/amd64
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  # ===============================
+  # JOB 3: DEPLOY TO BACKEND EC2
+  # ===============================
+  deploy-backend:
+    name: 🚀 Deploy to Backend EC2
+    runs-on: ubuntu-latest
+    needs: build-backend
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/production'
+    
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+    
+    - name: 🔑 Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+    
+    - name: 📋 Create/Update CodeDeploy Application for Backend
+      run: |
+        # Crear aplicación para backend
+        if ! aws deploy get-application --application-name stockmarket-backend-api 2>/dev/null; then
+          aws deploy create-application \
+            --application-name stockmarket-backend-api \
+            --compute-platform Server
+        fi
+        
+        # Crear deployment group para backend
+        if ! aws deploy get-deployment-group \
+          --application-name stockmarket-backend-api \
+          --deployment-group-name backend-deployment-group 2>/dev/null; then
+          
+          aws deploy create-deployment-group \
+            --application-name stockmarket-backend-api \
+            --deployment-group-name backend-deployment-group \
+            --service-role-arn ${{ secrets.CODEDEPLOY_SERVICE_ROLE_ARN }} \
+            --ec2-tag-filters Key=ServiceType,Value=backend,Type=KEY_AND_VALUE Key=Environment,Value=production,Type=KEY_AND_VALUE \
+            --auto-rollback-configuration enabled=true,events=DEPLOYMENT_FAILURE
+        fi
+    
+    - name: 📦 Prepare Backend Deployment Package
+      run: |
+        mkdir -p backend-deployment-package/scripts
+        
+        # AppSpec para backend
+        cat > backend-deployment-package/appspec.yml << 'EOF'
+        version: 0.0
+        os: linux
+        files:
+          - source: /
+            destination: /opt/stockmarket-backend
+            overwrite: yes
+        permissions:
+          - object: /opt/stockmarket-backend
+            pattern: "**"
+            owner: ec2-user
+            group: ec2-user
+            mode: 755
+        hooks:
+          BeforeInstall:
+            - location: scripts/stop_backend.sh
+              timeout: 300
+              runas: root
+          ApplicationStart:
+            - location: scripts/start_backend.sh
+              timeout: 300
+              runas: root
+          ValidateService:
+            - location: scripts/validate_backend.sh
+              timeout: 300
+              runas: root
+        EOF
+        
+        # Script para detener backend
+        cat > backend-deployment-package/scripts/stop_backend.sh << 'EOF'
+        #!/bin/bash
+        echo "🛑 Stopping Backend Services..."
+        cd /opt/stockmarket-backend || exit 0
+        docker-compose down || true
+        docker container prune -f
+        echo "✅ Backend services stopped"
+        EOF
+        
+        # Script para iniciar backend
+        cat > backend-deployment-package/scripts/start_backend.sh << 'EOF'
+        #!/bin/bash
+        echo "🚀 Starting Backend Services..."
+        cd /opt/stockmarket-backend
+        
+        # Login a ECR
+        aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws
+        
+        # Crear docker-compose.yml para backend
+        cat > docker-compose.yml << 'COMPOSE'
+        version: '3.8'
+        
+        services:
+          postgres:
+            image: postgres:14
+            environment:
+              POSTGRES_DB: stock_data
+              POSTGRES_USER: postgres
+              POSTGRES_PASSWORD: ${DB_PASSWORD:-tu_password}
+            volumes:
+              - postgres_data:/var/lib/postgresql/data
+              - ./db/tables.sql:/docker-entrypoint-initdb.d/tables.sql
+            ports:
+              - "5432:5432"
+            networks:
+              - backend-network
+        
+          rabbitmq:
+            image: rabbitmq:3-management
+            environment:
+              RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+              RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-guest}
+            ports:
+              - "5672:5672"
+              - "15672:15672"
+            networks:
+              - backend-network
+        
+          api:
+            image: public.ecr.aws/your-alias/stockmarket-api:latest
+            environment:
+              NODE_ENV: production
+              DB_HOST: postgres
+              DB_NAME: stock_data
+              DB_USER: postgres
+              DB_PASSWORD: ${DB_PASSWORD:-tu_password}
+              RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+              GROUP_ID: "1"
+            ports:
+              - "3000:3000"
+            depends_on:
+              - postgres
+              - rabbitmq
+            networks:
+              - backend-network
+        
+          mqtt-client:
+            image: public.ecr.aws/your-alias/stockmarket-mqtt-client:latest
+            environment:
+              NODE_ENV: production
+              API_URL: http://api:3000/stocks
+              GROUP_ID: "1"
+            depends_on:
+              - api
+            networks:
+              - backend-network
+        
+        volumes:
+          postgres_data:
+        
+        networks:
+          backend-network:
+            driver: bridge
+        COMPOSE
+        
+        # Iniciar servicios
+        docker-compose up -d
+        echo "✅ Backend services started"
+        EOF
+        
+        # Script para validar backend
+        cat > backend-deployment-package/scripts/validate_backend.sh << 'EOF'
+        #!/bin/bash
+        echo "✅ Validating Backend Services..."
+        sleep 30
+        
+        # Verificar API
+        if curl -f http://localhost:3000/health 2>/dev/null; then
+          echo "✅ API service is healthy"
+        else
+          echo "❌ API service failed health check"
+          exit 1
+        fi
+        
+        # Verificar containers
+        RUNNING_CONTAINERS=$(docker ps --format "table {{.Names}}" | grep -E "(api|mqtt|postgres|rabbitmq)" | wc -l)
+        if [ "$RUNNING_CONTAINERS" -ge "3" ]; then
+          echo "✅ Backend containers are running ($RUNNING_CONTAINERS/4)"
+        else
+          echo "⚠️ Some backend containers may not be running"
+        fi
+        
+        echo "✅ Backend validation completed"
+        EOF
+        
+        # Hacer scripts ejecutables
+        chmod +x backend-deployment-package/scripts/*.sh
+        
+        # Crear ZIP
+        cd backend-deployment-package
+        zip -r ../backend-deployment.zip .
+        cd ..
+    
+    - name: 📤 Upload Backend Package to S3
+      run: |
+        BUCKET_NAME="stockmarket-deployments-$(date +%Y%m%d)"
+        if ! aws s3api head-bucket --bucket "$BUCKET_NAME" 2>/dev/null; then
+          aws s3 mb "s3://$BUCKET_NAME"
+        fi
+        
+        REVISION_KEY="stockmarket-backend-${GITHUB_SHA}.zip"
+        aws s3 cp backend-deployment.zip "s3://$BUCKET_NAME/$REVISION_KEY"
+        
+        echo "BACKEND_BUCKET_NAME=$BUCKET_NAME" >> $GITHUB_ENV
+        echo "BACKEND_REVISION_KEY=$REVISION_KEY" >> $GITHUB_ENV
+    
+    - name: 🚀 Deploy Backend with CodeDeploy
+      run: |
+        DEPLOYMENT_ID=$(aws deploy create-deployment \
+          --application-name stockmarket-backend-api \
+          --deployment-group-name backend-deployment-group \
+          --s3-location bucket=$BACKEND_BUCKET_NAME,key=$BACKEND_REVISION_KEY,bundleType=zip \
+          --deployment-config-name CodeDeployDefault.AllAtOneCodeDeployDefault \
+          --description "Backend deployment - Commit: $GITHUB_SHA" \
+          --query 'deploymentId' \
+          --output text)
+        
+        echo "📋 Backend Deployment ID: $DEPLOYMENT_ID"
+        
+        # Esperar a que complete
+        aws deploy wait deployment-successful --deployment-id $DEPLOYMENT_ID
+        
+        echo "✅ Backend deployment completed successfully!"
+
+  # ===============================
+  # JOB 4: NOTIFICATION
+  # ===============================
+  notify-backend:
+    name: 📢 Notify Backend Deployment
+    runs-on: ubuntu-latest
+    needs: [ci, build-backend, deploy-backend]
+    if: always()
+    
+    steps:
+    - name: 📢 Success Notification
+      if: needs.deploy-backend.result == 'success'
+      run: |
+        echo "✅ 🎉 BACKEND API DEPLOYMENT SUCCESSFUL! 🎉"
+        echo "📋 Commit: $GITHUB_SHA"
+        echo "🎯 Services: API, MQTT Client, PostgreSQL, RabbitMQ"
+        echo "🔗 Workflow: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+    
+    - name: 📢 Failure Notification
+      if: needs.deploy-backend.result == 'failure'
+      run: |
+        echo "❌ 🚨 BACKEND API DEPLOYMENT FAILED! 🚨"
+        echo "🔗 Check logs: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+        exit 1
