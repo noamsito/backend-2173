@@ -1,0 +1,103 @@
+# boletas-serverless/serverless.yml - CORREGIDO SIN AWS_REGION
+service: boletas-pdf-grupo1
+
+frameworkVersion: '3'
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+  region: us-east-1
+  stage: ${opt:stage, 'dev'}
+  memorySize: 512
+  timeout: 30
+  
+  # Variables de entorno (SIN AWS_REGION)
+  environment:
+    BUCKET_NAME: boletas-grupo1-${self:provider.stage}-${sls:instanceId}
+    GRUPO_NOMBRE: "Grupo 1 - IIC2173"
+    STAGE: ${self:provider.stage}
+    # AWS_REGION se proporciona automáticamente por AWS Lambda
+    
+  iamRoleStatements:
+    - Effect: Allow
+      Action:
+        - s3:PutObject
+        - s3:PutObjectAcl
+        - s3:GetObject
+        - s3:HeadObject
+        - s3:ListBucket
+      Resource: 
+        - "arn:aws:s3:::boletas-grupo1-${self:provider.stage}-${sls:instanceId}"
+        - "arn:aws:s3:::boletas-grupo1-${self:provider.stage}-${sls:instanceId}/*"
+
+functions:
+  generateBoleta:
+    handler: src/handlers/generateBoleta.handler
+    description: Genera boletas PDF para compras de acciones
+    events:
+      - http:
+          path: /generate-boleta
+          method: post
+          cors: true
+      - http:
+          path: /generate-boleta
+          method: options
+          cors: true
+    
+  getBoletaStatus:
+    handler: src/handlers/generateBoleta.getBoletaStatusHandler
+    description: Obtiene el estado y URL de descarga de una boleta
+    events:
+      - http:
+          path: /boleta/{boletaId}
+          method: get
+          cors: true
+                
+  healthCheck:
+    handler: src/handlers/generateBoleta.healthCheckHandler
+    description: Endpoint de salud para monitoreo
+    events:
+      - http:
+          path: /health
+          method: get
+          cors: true
+
+resources:
+  Resources:
+    BoletasBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: boletas-grupo1-${self:provider.stage}-${sls:instanceId}
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: false
+          BlockPublicPolicy: false
+          IgnorePublicAcls: false
+          RestrictPublicBuckets: false
+        CorsConfiguration:
+          CorsRules:
+            - AllowedHeaders: ['*']
+              AllowedMethods: [GET, HEAD, POST]
+              AllowedOrigins: ['*']
+              MaxAge: 3000
+              
+    BoletasBucketPolicy:
+      Type: AWS::S3::BucketPolicy
+      Properties:
+        Bucket: !Ref BoletasBucket
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Sid: PublicReadGetObject
+              Effect: Allow
+              Principal: '*'
+              Action: 's3:GetObject'
+              Resource: !Sub "${BoletasBucket}/boletas/*"
+
+  Outputs:
+    ApiGatewayUrl:
+      Value: !Sub "https://${ApiGatewayRestApi}.execute-api.${self:provider.region}.amazonaws.com/${self:provider.stage}"
+      Description: "URL base del API Gateway para boletas PDF"
+      
+    BucketName:
+      Value: !Ref BoletasBucket
+      Description: "Nombre del bucket S3 para boletas"

@@ -1,4 +1,7 @@
+# boletas-serverless/serverless.yml
 service: boletas-pdf-grupo1
+
+frameworkVersion: '3'
 
 provider:
   name: aws
@@ -8,207 +11,48 @@ provider:
   memorySize: 512
   timeout: 30
   
-  # Variables de entorno para Lambda
   environment:
-    BUCKET_NAME: ${self:custom.bucketName}
+    BUCKET_NAME: boletas-grupo1-${self:provider.stage}
     GRUPO_NOMBRE: "Grupo 1 - IIC2173"
     STAGE: ${self:provider.stage}
     
-  # Permisos IAM para Lambda
   iamRoleStatements:
     - Effect: Allow
       Action:
         - s3:PutObject
         - s3:PutObjectAcl
         - s3:GetObject
-      Resource: "arn:aws:s3:::${self:custom.bucketName}/*"
-    - Effect: Allow
-      Action:
+        - s3:HeadObject
         - s3:ListBucket
-      Resource: "arn:aws:s3:::${self:custom.bucketName}"
-
-# Variables personalizadas
-custom:
-  bucketName: boletas-grupo1-${self:provider.stage}
-  
-  # Configuración de API Gateway
-  apiGateway:
-    binaryMediaTypes:
-      - 'application/pdf'
-      - 'application/octet-stream'
-  
-  # Configuración CORS para API Gateway
-  customDomain:
-    rest:
-      domainName: boletas-api.tu-dominio.com  # Opcional
-      certificateName: '*.tu-dominio.com'     # Opcional
+      Resource: 
+        - "arn:aws:s3:::boletas-grupo1-${self:provider.stage}"
+        - "arn:aws:s3:::boletas-grupo1-${self:provider.stage}/*"
 
 functions:
-  # Función principal para generar boletas
   generateBoleta:
     handler: src/handlers/generateBoleta.handler
-    description: Genera boletas PDF para compras de acciones
     events:
       - http:
           path: /generate-boleta
           method: post
-          cors:
-            origin: '*'
-            headers:
-              - Content-Type
-              - X-Amz-Date
-              - Authorization
-              - X-Api-Key
-              - X-Amz-Security-Token
-              - X-Amz-User-Agent
-            allowCredentials: true
-          request:
-            schemas:
-              application/json:
-                schema: ${file(schemas/boleta-request.json)}
+          cors: true
+      - http:
+          path: /generate-boleta
+          method: options
+          cors: true
     
-  # Función para obtener estado de una boleta
   getBoletaStatus:
-    handler: src/handlers/getBoletaStatus.handler
-    description: Obtiene el estado y URL de descarga de una boleta
+    handler: src/handlers/generateBoleta.getBoletaStatusHandler
     events:
       - http:
           path: /boleta/{boletaId}
           method: get
           cors: true
-          request:
-            parameters:
-              paths:
-                boletaId: true
                 
-  # Función de healthcheck para API Gateway
   healthCheck:
-    handler: src/handlers/healthCheck.handler
-    description: Endpoint de salud para monitoreo
+    handler: src/handlers/generateBoleta.healthCheckHandler
     events:
       - http:
           path: /health
           method: get
           cors: true
-
-# Recursos de AWS adicionales
-resources:
-  Resources:
-    # Bucket S3 para almacenar boletas
-    BoletasBucket:
-      Type: AWS::S3::Bucket
-      Properties:
-        BucketName: ${self:custom.bucketName}
-        PublicReadPolicy:
-          Version: '2012-10-17'
-          Statement:
-            - Sid: PublicReadGetObject
-              Effect: Allow
-              Principal: '*'
-              Action: 's3:GetObject'
-              Resource: "arn:aws:s3:::${self:custom.bucketName}/boletas/*"
-        CorsConfiguration:
-          CorsRules:
-            - AllowedHeaders: ['*']
-              AllowedMethods: [GET, HEAD]
-              AllowedOrigins: ['*']
-              MaxAge: 3000
-        NotificationConfiguration:
-          CloudWatchConfigurations:
-            - Event: s3:ObjectCreated:*
-              CloudWatchConfiguration:
-                LogGroupName: !Ref BoletasLogGroup
-                
-    # Política del bucket para acceso público de lectura a boletas
-    BoletasBucketPolicy:
-      Type: AWS::S3::BucketPolicy
-      Properties:
-        Bucket: !Ref BoletasBucket
-        PolicyDocument:
-          Version: '2012-10-17'
-          Statement:
-            - Sid: PublicReadGetObject
-              Effect: Allow
-              Principal: '*'
-              Action: 's3:GetObject'
-              Resource: !Sub "${BoletasBucket}/boletas/*"
-              
-    # CloudWatch Log Group para logs
-    BoletasLogGroup:
-      Type: AWS::Logs::LogGroup
-      Properties:
-        LogGroupName: /aws/lambda/boletas-grupo1-${self:provider.stage}
-        RetentionInDays: 14
-        
-    # API Gateway personalizado con configuraciones adicionales
-    ApiGatewayRestApi:
-      Type: AWS::ApiGateway::RestApi
-      Properties:
-        Name: boletas-api-${self:provider.stage}
-        Description: API para generación de boletas PDF
-        EndpointConfiguration:
-          Types:
-            - REGIONAL
-        BinaryMediaTypes:
-          - 'application/pdf'
-          - 'application/octet-stream'
-        Policy:
-          Version: '2012-10-17'
-          Statement:
-            - Effect: Allow
-              Principal: '*'
-              Action: 'execute-api:Invoke'
-              Resource: '*'
-              
-    # CloudWatch Dashboard para monitoreo
-    BoletasDashboard:
-      Type: AWS::CloudWatch::Dashboard
-      Properties:
-        DashboardName: boletas-grupo1-${self:provider.stage}
-        DashboardBody: !Sub |
-          {
-            "widgets": [
-              {
-                "type": "metric",
-                "properties": {
-                  "metrics": [
-                    ["AWS/Lambda", "Duration", "FunctionName", "${self:service}-${self:provider.stage}-generateBoleta"],
-                    [".", "Errors", ".", "."],
-                    [".", "Invocations", ".", "."]
-                  ],
-                  "period": 300,
-                  "stat": "Average",
-                  "region": "${self:provider.region}",
-                  "title": "Lambda Metrics"
-                }
-              }
-            ]
-          }
-
-  # Outputs para usar en otros servicios
-  Outputs:
-    ApiGatewayRestApiId:
-      Value: !Ref ApiGatewayRestApi
-      Export:
-        Name: ${self:service}-${self:provider.stage}-ApiGatewayRestApiId
-        
-    ApiGatewayRootResourceId:
-      Value: !GetAtt ApiGatewayRestApi.RootResourceId
-      Export:
-        Name: ${self:service}-${self:provider.stage}-ApiGatewayRootResourceId
-        
-    BoletasBucketName:
-      Value: !Ref BoletasBucket
-      Export:
-        Name: ${self:service}-${self:provider.stage}-BoletasBucketName
-        
-    ApiGatewayUrl:
-      Value: !Sub "https://${ApiGatewayRestApi}.execute-api.${self:provider.region}.amazonaws.com/${self:provider.stage}"
-      Export:
-        Name: ${self:service}-${self:provider.stage}-ApiGatewayUrl
-
-# Plugins necesarios
-plugins:
-  - serverless-offline
-  - serverless-s3-local
-  - serverless-dynamodb-local
