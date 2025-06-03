@@ -2,45 +2,11 @@
   "$schema": "http://json-schema.org/draft-04/schema#",
   "type": "object",
   "properties": {
-    "userId": {
-      "type": ["string", "number"],
-      "description": "ID del usuario"
-    },
-    "userName": {
-      "type": "string",
-      "minLength": 1,
-      "description": "Nombre del usuario"
-    },
-    "userEmail": {
-      "type": "string",
-      "format": "email",
-      "description": "Email del usuario"
-    },
-    "purchaseId": {
-      "type": "string",
-      "description": "ID de la compra"
-    },
-    "stockSymbol": {
-      "type": "string",
-      "minLength": 1,
-      "description": "Símbolo de la acción"
-    },
-    "quantity": {
-      "type": "number",
-      "minimum": 1,
-      "description": "Cantidad de acciones"
-    },
-    "pricePerShare": {
-      "type": "number",
-      "minimum": 0,
-      "description": "Precio por acción"
-    },
-    "totalAmount": {
-      "type": "number",
-      "minimum": 0,
-      "description": "Monto total"
-    }
+    "userId": { "type": ["string", "number"] },
+    "userName": { "type": "string", "minLength": 1 },
+    "stockSymbol": { "type": "string", "minLength": 1 },
+    "quantity": { "type": "number", "minimum": 1 },
+    "pricePerShare": { "type": "number", "minimum": 0 }
   },
-  "required": ["userId", "userName", "stockSymbol", "quantity", "pricePerShare"],
-  "additionalProperties": false
+  "required": ["userId", "userName", "stockSymbol", "quantity", "pricePerShare"]
 }
