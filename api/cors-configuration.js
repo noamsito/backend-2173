@@ -18,6 +18,8 @@ const allowedOrigins = [
   'https://boletas-api.antonioescobar.lat',
   'http://antonioescobar.lat',
   'https://antonioescobar.lat',
+
+  'https://r12c7vfhig.execute-api.us-east-1.amazonaws.com',
   
   // S3 Frontend
   'http://frontend-grupo1-iic2173.s3-website-us-east-1.amazonaws.com',
@@ -26,7 +28,20 @@ const allowedOrigins = [
   // Variables de entorno
   process.env.FRONTEND_URL,
   process.env.DOMAIN_URL,
+  process.env.API_GATEWAY_URL, // Nueva variable
 ].filter(Boolean); // Remover valores undefined
+
+export const apiGatewayMiddleware = (req, res, next) => {
+  // Headers específicos para API Gateway
+  res.header('Access-Control-Allow-Credentials', 'true');
+  res.header('Access-Control-Max-Age', '86400');
+  
+  // Log para debugging
+  console.log(`API Gateway request: ${req.method} ${req.path}`);
+  console.log(`Origin: ${req.get('Origin') || 'no-origin'}`);
+  
+  next();
+};
 
 // Configuración CORS optimizada
 export const corsOptions = {
