@@ -29,7 +29,7 @@ export class WebpayController {
       // Crear orden única y sesión
       const buyOrder = `order-${orderId}-${Date.now()}`;
       const sessionId = `session-${userId}-${Date.now()}`;
-      const returnUrl = process.env.TRANSBANK_RETURN_URL || 'http://localhost:3000/webpay/return';
+      const returnUrl = process.env.TRANSBANK_RETURN_URL || 'https://r12c7vfhig.execute-api.us-east-1.amazonaws.com/prod/webpay/return';
 
       // Crear transacción en Transbank
       const result = await TransbankService.createTransaction(
@@ -131,7 +131,7 @@ export class WebpayController {
           console.error('Error procesando cancelación:', error);
         }
         
-        const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:80';
+        const frontendUrl = process.env.FRONTEND_URL || 'https://antonioescobar.lat';
         return res.redirect(`${frontendUrl}/stocks/cancelado?status=cancelled&message=Compra cancelada por el usuario`);
       }
   
@@ -150,7 +150,7 @@ export class WebpayController {
         
         if (transactionResult.rows.length === 0) {
           console.log(`❌ Token no encontrado: ${token_ws}`);
-          const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:80';
+          const frontendUrl = process.env.FRONTEND_URL || 'https://antonioescobar.lat';
           return res.redirect(`${frontendUrl}/stocks?status=error&message=Token de transacción no encontrado`);
         }
         
@@ -169,7 +169,7 @@ export class WebpayController {
             WHERE token_ws = $1
           `, [token_ws]);
           
-          const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:80';
+          const frontendUrl = process.env.FRONTEND_URL || 'https://antonioescobar.lat';
           return res.redirect(`${frontendUrl}/stocks/${transaction.symbol}?status=failed&message=Error al confirmar el pago&request_id=${transaction.request_id}`);
         }
         
@@ -222,7 +222,7 @@ export class WebpayController {
             }
           
             // ✅ NUEVA REDIRECCIÓN CORRECTA
-            const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:80';
+            const frontendUrl = process.env.FRONTEND_URL || 'https://antonioescobar.lat';
             return res.redirect(`${frontendUrl}/stocks/${transaction.symbol}?status=success&message=¡Compra de ${transaction.quantity} acciones de ${transaction.symbol} realizada exitosamente!&request_id=${transaction.request_id}`);
           
           } else {
@@ -232,7 +232,7 @@ export class WebpayController {
               WHERE token_ws = $1
             `, [token_ws]);
             
-            const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:80';
+            const frontendUrl = process.env.FRONTEND_URL || 'https://antonioescobar.lat';
             return res.redirect(`${frontendUrl}/stocks/${transaction.symbol}?status=error&message=Error procesando la compra después del pago&request_id=${transaction.request_id}`);
           }
           
@@ -244,7 +244,7 @@ export class WebpayController {
             WHERE token_ws = $1
           `, [token_ws]);
           
-          const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:80';
+          const frontendUrl = process.env.FRONTEND_URL || 'https://antonioescobar.lat';
           return res.redirect(`${frontendUrl}/stocks/${transaction.symbol}?status=failed&message=Pago rechazado por el banco&request_id=${transaction.request_id}`);
         }
       } finally {
@@ -255,7 +255,7 @@ export class WebpayController {
       console.error('💥 Error en webpay return:', error);
       
       // En cualquier error, tratar como cancelación
-      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:80';
+      const frontendUrl = process.env.FRONTEND_URL || 'https://antonioescobar.lat';
       const symbol = req.body?.symbol || req.query?.symbol || 'unknown';
       return res.redirect(`${frontendUrl}/stocks/${symbol}?status=error&message=Error procesando el pago - transacción cancelada`);
     }

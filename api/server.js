@@ -25,7 +25,7 @@ app.use(customCorsMiddleware);
 app.use('/webpay', webpayCorsmiddleware);
 
 dotenv.config();
-const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:80';
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://antonioescobar.lat';
 
 const WORKERS_API_URL = process.env.WORKERS_API_URL || 'http://localhost:3000';
 
@@ -659,7 +659,7 @@ app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
         const shortRequestId = requestId.split('-')[0]; 
         const buyOrder = `${symbol}-${shortRequestId}`;
         const sessionId = `session-${req.userId}-${Date.now()}`;
-        const returnUrl = process.env.TRANSBANK_RETURN_URL || 'http://localhost:3000/webpay/return';
+        const returnUrl = process.env.TRANSBANK_RETURN_URL || 'https://r12c7vfhig.execute-api.us-east-1.amazonaws.com/prod/webpay/return';
 
         // 1. CREAR TRANSACCIÓN WEBPAY
         const webpayResult = await TransbankService.createTransaction(
