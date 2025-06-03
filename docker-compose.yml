@@ -1,144 +1,129 @@
 version: '3.8'
 
-
 services:
+  db:
+    image: postgres:14-alpine  # Usar imagen alpine (más pequeña)
+    container_name: postgres_db
+    environment:
+      POSTGRES_DB: stock_data
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: tu_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/tables.sql:/docker-entrypoint-initdb.d/tables.sql
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    # Limitar memoria
+    mem_limit: 512m
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   api:
-    build:
-      context: .              # Usar la raíz (backend-2173) como contexto
-      dockerfile: ./api/Dockerfile  # Especificar dónde está el Dockerfile
+    build: 
+      context: .
+      dockerfile: api/Dockerfile
+    container_name: api_server
     ports:
       - "3000:3000"
-    depends_on:
-      db:
-        condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
     environment:
       - DB_HOST=db
       - DB_USER=postgres
-      - DB_PASSWORD=admin123
+      - DB_PASSWORD=tu_password
       - DB_NAME=stock_data
       - DB_PORT=5432
-      - GROUP_ID=1
-      - NEW_RELIC_LICENSE_KEY=2a9b48ca67bc5211688f3a68d3e25d09FFFFNRAL
-      - NEW_RELIC_APP_NAME=new_relic_back
-      - NEW_RELIC_LOG=stdout
-      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/  # NUEVA VARIABLE
-      - TRANSBANK_ENVIRONMENT=integration
-      - FRONTEND_URL=https://antonioescobar.lat
-      - TRANSBANK_COMMERCE_CODE=597055555532
-      - TRANSBANK_API_KEY=579B532A7440BB0C9079DED94D31EA1615BACEB56610332264630D42D0A36B1C
-      - TRANSBANK_RETURN_URL=https://r12c7vfhig.execute-api.us-east-1.amazonaws.com/prod/webpay/return
-      - TRANSBANK_FINAL_URL=http://localhost:80/payment/result
-    volumes:
-      - ./mqtt-client:/app/mqtt-client
+    depends_on:
+      - db
     restart: unless-stopped
+    # Limitar memoria
+    mem_limit: 512m
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   mqtt-client:
-    build: ./mqtt-client
-    depends_on:
-      - api
+    build: 
+      context: .
+      dockerfile: mqtt-client/Dockerfile
+    container_name: mqtt_client
     environment:
+      - API_URL=http://api:3000/stocks
       - HOST=broker.iic2173.org
       - PORT=9000
       - USERNAME=students
       - PASSWORD=iic2173-2025-1-students
-      - API_URL=http://api:3000/stocks
-    restart: unless-stopped
-
-  db:
-    build: ./db
-    ports:
-      - "5432:5432"
-    volumes:
-      - pg_data:/var/lib/postgresql/data
-    environment:
-      - POSTGRES_PASSWORD=admin123
-      - POSTGRES_DB=stock_data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d stock_data"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
-
-  # 🆕 SERVICIOS NUEVOS - NO TOCAR LO DE ARRIBA
-  
-  # RabbitMQ para colas de trabajos
-  rabbitmq:
-    image: rabbitmq:3-management
-    ports:
-      - "5672:5672"
-      - "15672:15672"  # UI de management
-    environment:
-      RABBITMQ_DEFAULT_USER: guest
-      RABBITMQ_DEFAULT_PASS: guest
-    volumes:
-      - rabbitmq_data:/var/lib/rabbitmq
-    healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "ping"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-    restart: unless-stopped
-
-  # Worker 1
-  worker1:
-    build: ./workers
+      - GROUP_ID=1
     depends_on:
-      rabbitmq:
-        condition: service_healthy
-      api:
-        condition: service_started
-    environment:
-      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
-      - API_BASE_URL=http://api:3000
-      - WORKER_NAME=worker1
-      - NODE_ENV=production
-    restart: unless-stopped
-
-  # Worker 2
-  worker2:
-    build: ./workers
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-      api:
-        condition: service_started
-    environment:
-      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
-      - API_BASE_URL=http://api:3000
-      - WORKER_NAME=worker2
-      - NODE_ENV=production
-    restart: unless-stopped
-
-  # Worker 3
-  worker3:
-    build: ./workers
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-      api:
-        condition: service_started
-    environment:
-      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
-      - API_BASE_URL=http://api:3000
-      - WORKER_NAME=worker3
-      - NODE_ENV=production
-    restart: unless-stopped
-
-  # Monitor de workers
-  worker-monitor:
-    build: ./workers
-    depends_on:
-      - rabbitmq
       - api
-    environment:
-      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
-      - API_BASE_URL=http://api:3000
-    command: ["npm", "run", "monitor"]
     restart: unless-stopped
+    # Limitar memoria
+    mem_limit: 256m
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Redis para JobMaster (imagen pequeña)
+  redis:
+    image: redis:7-alpine
+    container_name: redis_server
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    mem_limit: 256m
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  jobmaster:
+    build: 
+      context: ./jobmaster-service
+      dockerfile: Dockerfile
+    container_name: jobmaster
+    ports:
+      - "3001:3000"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - PORT=3000
+    depends_on:
+      - redis
+    restart: unless-stopped
+    mem_limit: 256m
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  worker:
+    build: 
+      context: ./jobmaster-service
+      dockerfile: Dockerfile
+    container_name: worker
+    command: ["node", "worker.js"]
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - WORKER_ID=worker-1
+      - WORKER_CONCURRENCY=2
+    depends_on:
+      - redis
+      - jobmaster
+    restart: unless-stopped
+    mem_limit: 256m
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
-  pg_data:
-  rabbitmq_data:  # NUEVO VOLUMEN
+  postgres_data:
+    driver: local
