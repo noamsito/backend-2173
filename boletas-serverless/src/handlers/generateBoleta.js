@@ -205,7 +205,11 @@ async function createPDFBoleta(data) {
 }
 
 // src/handlers/getBoletaStatus.js
-export const getBoletaStatusHandler = async (event, context) => {
+import { S3Client, HeadObjectCommand } from '@aws-sdk/client-s3';
+
+const s3Client = new S3Client({ region: process.env.AWS_REGION });
+
+export const handler = async (event, context) => {
   try {
     const { boletaId } = event.pathParameters;
     
@@ -228,7 +232,7 @@ export const getBoletaStatusHandler = async (event, context) => {
 
     // Intentar obtener metadata del objeto
     try {
-      const headCommand = new (await import('@aws-sdk/client-s3')).HeadObjectCommand({
+      const headCommand = new HeadObjectCommand({
         Bucket: process.env.BUCKET_NAME,
         Key: s3Key
       });
@@ -287,7 +291,7 @@ export const getBoletaStatusHandler = async (event, context) => {
 };
 
 // src/handlers/healthCheck.js
-export const healthCheckHandler = async (event, context) => {
+export const handler = async (event, context) => {
   return {
     statusCode: 200,
     headers: {

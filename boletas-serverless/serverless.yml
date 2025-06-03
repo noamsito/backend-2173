@@ -36,12 +36,6 @@ custom:
     binaryMediaTypes:
       - 'application/pdf'
       - 'application/octet-stream'
-  
-  # Configuración CORS para API Gateway
-  customDomain:
-    rest:
-      domainName: boletas-api.tu-dominio.com  # Opcional
-      certificateName: '*.tu-dominio.com'     # Opcional
 
 functions:
   # Función principal para generar boletas
@@ -62,10 +56,6 @@ functions:
               - X-Amz-Security-Token
               - X-Amz-User-Agent
             allowCredentials: true
-          request:
-            schemas:
-              application/json:
-                schema: ${file(schemas/boleta-request.json)}
     
   # Función para obtener estado de una boleta
   getBoletaStatus:
@@ -94,32 +84,24 @@ functions:
 # Recursos de AWS adicionales
 resources:
   Resources:
-    # Bucket S3 para almacenar boletas
+    # Bucket S3 para almacenar boletas - CONFIGURACIÓN CORREGIDA
     BoletasBucket:
       Type: AWS::S3::Bucket
       Properties:
         BucketName: ${self:custom.bucketName}
-        PublicReadPolicy:
-          Version: '2012-10-17'
-          Statement:
-            - Sid: PublicReadGetObject
-              Effect: Allow
-              Principal: '*'
-              Action: 's3:GetObject'
-              Resource: "arn:aws:s3:::${self:custom.bucketName}/boletas/*"
         CorsConfiguration:
           CorsRules:
             - AllowedHeaders: ['*']
               AllowedMethods: [GET, HEAD]
               AllowedOrigins: ['*']
               MaxAge: 3000
-        NotificationConfiguration:
-          CloudWatchConfigurations:
-            - Event: s3:ObjectCreated:*
-              CloudWatchConfiguration:
-                LogGroupName: !Ref BoletasLogGroup
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: false
+          BlockPublicPolicy: false
+          IgnorePublicAcls: false
+          RestrictPublicBuckets: false
                 
-    # Política del bucket para acceso público de lectura a boletas
+    # Política del bucket para acceso público de lectura a boletas - SEPARADA DEL BUCKET
     BoletasBucketPolicy:
       Type: AWS::S3::BucketPolicy
       Properties:
@@ -139,51 +121,6 @@ resources:
       Properties:
         LogGroupName: /aws/lambda/boletas-grupo1-${self:provider.stage}
         RetentionInDays: 14
-        
-    # API Gateway personalizado con configuraciones adicionales
-    ApiGatewayRestApi:
-      Type: AWS::ApiGateway::RestApi
-      Properties:
-        Name: boletas-api-${self:provider.stage}
-        Description: API para generación de boletas PDF
-        EndpointConfiguration:
-          Types:
-            - REGIONAL
-        BinaryMediaTypes:
-          - 'application/pdf'
-          - 'application/octet-stream'
-        Policy:
-          Version: '2012-10-17'
-          Statement:
-            - Effect: Allow
-              Principal: '*'
-              Action: 'execute-api:Invoke'
-              Resource: '*'
-              
-    # CloudWatch Dashboard para monitoreo
-    BoletasDashboard:
-      Type: AWS::CloudWatch::Dashboard
-      Properties:
-        DashboardName: boletas-grupo1-${self:provider.stage}
-        DashboardBody: !Sub |
-          {
-            "widgets": [
-              {
-                "type": "metric",
-                "properties": {
-                  "metrics": [
-                    ["AWS/Lambda", "Duration", "FunctionName", "${self:service}-${self:provider.stage}-generateBoleta"],
-                    [".", "Errors", ".", "."],
-                    [".", "Invocations", ".", "."]
-                  ],
-                  "period": 300,
-                  "stat": "Average",
-                  "region": "${self:provider.region}",
-                  "title": "Lambda Metrics"
-                }
-              }
-            ]
-          }
 
   # Outputs para usar en otros servicios
   Outputs:
@@ -191,11 +128,6 @@ resources:
       Value: !Ref ApiGatewayRestApi
       Export:
         Name: ${self:service}-${self:provider.stage}-ApiGatewayRestApiId
-        
-    ApiGatewayRootResourceId:
-      Value: !GetAtt ApiGatewayRestApi.RootResourceId
-      Export:
-        Name: ${self:service}-${self:provider.stage}-ApiGatewayRootResourceId
         
     BoletasBucketName:
       Value: !Ref BoletasBucket
@@ -210,5 +142,3 @@ resources:
 # Plugins necesarios
 plugins:
   - serverless-offline
-  - serverless-s3-local
-  - serverless-dynamodb-local
