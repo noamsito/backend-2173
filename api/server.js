@@ -24,7 +24,19 @@ app.use(customCorsMiddleware);
 // Para rutas específicas de WebPay
 app.use('/webpay', webpayCorsmiddleware);
 
+// Middleware de debugging
+app.use('/api/purchases', (req, res, next) => {
+    console.log(`🔍 ${req.method} ${req.path} - Origin: ${req.get('Origin')}`);
+    next();
+});
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use('/api/purchases', purchaseRoutes);
+
+
 dotenv.config();
+
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://antonioescobar.lat';
 
 const WORKERS_API_URL = process.env.WORKERS_API_URL || 'http://localhost:3000';
@@ -85,17 +97,6 @@ const checkJwt = auth({
     issuerBaseURL: `https://${process.env.AUTH0_DOMAIN}` || 'https://dev-ouxdigl1l6bn6n3r.us.auth0.com/',
     tokenSigningAlg: 'RS256'
 });
-
-
-// Middleware de debugging
-app.use('/api/purchases', (req, res, next) => {
-    console.log(`🔍 ${req.method} ${req.path} - Origin: ${req.get('Origin')}`);
-    next();
-});
-
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-app.use('/api/purchases', purchaseRoutes);
 
 const client = await pool.connect();
 

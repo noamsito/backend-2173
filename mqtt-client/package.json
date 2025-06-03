@@ -1,23 +1,25 @@
-
 {
-  "name": "listener",
+  "name": "mqtt-client",
   "version": "1.0.0",
-  "description": "",
+  "description": "Cliente MQTT para el sistema de stocks",
   "type": "module",
   "main": "mqttConnect.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node mqttConnect.js"
+    "start": "node mqttConnect.js",
+    "dev": "nodemon mqttConnect.js"
   },
-  "keywords": [],
+  "keywords": ["mqtt", "stocks", "iic2173"],
   "author": "",
   "license": "ISC",
   "dependencies": {
     "mqtt": "^5.10.4",
     "node-fetch": "^3.3.2",
-    "pg": "^8.14.1"
+    "uuid": "^11.1.0",
+    "express": "^4.21.2",
+    "dotenv": "^16.4.7"
   },
   "devDependencies": {
-    "dotenv": "^16.4.7"
+    "nodemon": "^3.1.9"
   }
 }

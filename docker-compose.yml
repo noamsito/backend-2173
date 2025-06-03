@@ -37,6 +37,9 @@ services:
       - AUTH0_CLIENT_SECRET=${AUTH0_CLIENT_SECRET}
       - AUTH0_AUDIENCE=${AUTH0_AUDIENCE:-https://stockmarket-api/}
       - WORKERS_API_URL=http://jobmaster:3000
+      - FRONTEND_URL=${FRONTEND_URL:-https://antonioescobar.lat}
+      - TRANSBANK_RETURN_URL=${TRANSBANK_RETURN_URL:-https://r12c7vfhig.execute-api.us-east-1.amazonaws.com/prod/webpay/return}
+      - BOLETAS_LAMBDA_URL=${BOLETAS_LAMBDA_URL}
     depends_on:
       - db
     restart: unless-stopped
@@ -49,8 +52,8 @@ services:
 
   mqtt-client:
     build: 
-      context: .
-      dockerfile: mqtt-client/Dockerfile
+      context: ./mqtt-client  # ✅ CAMBIO: contexto correcto
+      dockerfile: Dockerfile   # ✅ CAMBIO: Dockerfile relativo al contexto
     container_name: mqtt_client
     environment:
       - API_URL=http://api:3000/stocks
