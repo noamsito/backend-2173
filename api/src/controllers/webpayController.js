@@ -84,18 +84,20 @@ export class WebpayController {
   
       // *** DETECTAR CANCELACIÓN ***
       // *** DETECTAR CANCELACIÓN ***
+      // *** DETECTAR CANCELACIÓN ***
       if (!token_ws || token_ws.trim() === '') {
         console.log('❌ Cancelación detectada: token vacío o nulo');
         
-        // ✅ NUEVO: Buscar transacción pendiente para cancelarla
+        // ✅ MEJORADO: Identificar mejor la transacción a cancelar y actualizar purchase_request
         try {
           const client = await pool.connect();
           
-          // Buscar transacciones pendientes por session_id o user reciente
+          // Buscar la transacción pendiente más reciente (de cualquier usuario en los últimos 5 minutos)
+          // En un ambiente real, usaríamos session info, pero por ahora usamos la más reciente
           const recentTransactionQuery = `
             SELECT * FROM webpay_transactions 
             WHERE status = 'pending' 
-            AND created_at > NOW() - INTERVAL '5 minutes'
+            AND created_at > NOW() - INTERVAL '2 minutes'
             ORDER BY created_at DESC 
             LIMIT 1
           `;
@@ -105,14 +107,23 @@ export class WebpayController {
           if (recentResult.rows.length > 0) {
             const transaction = recentResult.rows[0];
             
-            // Marcar como cancelada
+            // 1. Marcar webpay_transaction como cancelada
             await client.query(`
               UPDATE webpay_transactions 
               SET status = 'cancelled', updated_at = NOW() 
               WHERE id = $1
             `, [transaction.id]);
             
-            console.log(`❌ Transacción cancelada: ${transaction.request_id}`);
+            // 2. ✅ NUEVO: Marcar purchase_request como cancelado también
+            await client.query(`
+              UPDATE purchase_requests 
+              SET status = 'CANCELLED', 
+                  reason = 'Pago cancelado por el usuario en WebPay',
+                  updated_at = CURRENT_TIMESTAMP
+              WHERE request_id = $1
+            `, [transaction.request_id]);
+            
+            console.log(`❌ Transacción y solicitud canceladas: ${transaction.request_id}`);
           }
           
           client.release();

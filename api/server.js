@@ -720,26 +720,26 @@ app.get('/purchases', checkJwt, syncUser, async (req, res) => {
     try {
         // Obtener compras del usuario con una consulta mejorada que evita duplicados
         const purchasesQuery = `
-            WITH latest_stocks AS (
-                SELECT DISTINCT ON (symbol) symbol, long_name, price, timestamp
-                FROM stocks
-                ORDER BY symbol, timestamp DESC
-            )
-            SELECT 
-                pr.id, 
-                pr.request_id, 
-                pr.symbol, 
-                pr.quantity, 
-                pr.price as price_at_purchase, 
-                pr.status, 
-                pr.reason,
-                pr.created_at,
-                ls.long_name
-            FROM purchase_requests pr
-            JOIN latest_stocks ls ON pr.symbol = ls.symbol
-            WHERE pr.user_id = $1
-            -- AND pr.status IN ('PENDING', 'ACCEPTED')
-            ORDER BY pr.created_at DESC
+        WITH latest_stocks AS (
+            SELECT DISTINCT ON (symbol) symbol, long_name, price, timestamp
+            FROM stocks
+            ORDER BY symbol, timestamp DESC
+        )
+        SELECT 
+            pr.id, 
+            pr.request_id, 
+            pr.symbol, 
+            pr.quantity, 
+            pr.price as price_at_purchase, 
+            pr.status, 
+            pr.reason,
+            pr.created_at,
+            ls.long_name
+        FROM purchase_requests pr
+        JOIN latest_stocks ls ON pr.symbol = ls.symbol
+        WHERE pr.user_id = $1
+        AND pr.status IN ('PENDING', 'ACCEPTED')
+        ORDER BY pr.created_at DESC
         `;
 
         const result = await client.query(purchasesQuery, [req.userId]);
