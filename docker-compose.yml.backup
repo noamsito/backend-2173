@@ -1,6 +1,7 @@
+
 services:
   db:
-    image: postgres:14-alpine
+    image: postgres:14-alpine  # Usar imagen alpine (más pequeña)
     container_name: postgres_db
     environment:
       POSTGRES_DB: stock_data
@@ -12,6 +13,7 @@ services:
     ports:
       - "5432:5432"
     restart: unless-stopped
+    # Limitar memoria
     mem_limit: 512m
     logging:
       driver: "json-file"
@@ -32,14 +34,10 @@ services:
       - DB_PASSWORD=tu_password
       - DB_NAME=stock_data
       - DB_PORT=5432
-      - AUTH0_DOMAIN=${AUTH0_DOMAIN:-dev-ouxdigl1l6bn6n3r.us.auth0.com}
-      - AUTH0_CLIENT_ID=${AUTH0_CLIENT_ID}
-      - AUTH0_CLIENT_SECRET=${AUTH0_CLIENT_SECRET}
-      - AUTH0_AUDIENCE=${AUTH0_AUDIENCE:-https://stockmarket-api/}
-      - WORKERS_API_URL=http://jobmaster:3000
     depends_on:
       - db
     restart: unless-stopped
+    # Limitar memoria
     mem_limit: 512m
     logging:
       driver: "json-file"
@@ -62,6 +60,7 @@ services:
     depends_on:
       - api
     restart: unless-stopped
+    # Limitar memoria
     mem_limit: 256m
     logging:
       driver: "json-file"
@@ -69,6 +68,7 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # Redis para JobMaster (imagen pequeña)
   redis:
     image: redis:7-alpine
     container_name: redis_server
@@ -76,12 +76,11 @@ services:
       - "6379:6379"
     restart: unless-stopped
     mem_limit: 256m
-    command: redis-server --maxmemory 128mb --maxmemory-policy allkeys-lru
     logging:
       driver: "json-file"
       options:
-        max-size: "5m"
-        max-file: "2"
+        max-size: "10m"
+        max-file: "3"
 
   jobmaster:
     build: 
