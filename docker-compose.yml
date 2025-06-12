@@ -30,6 +30,10 @@ services:
       - TRANSBANK_API_KEY=579B532A7440BB0C9079DED94D31EA1615BACEB56610332264630D42D0A36B1C
       - TRANSBANK_RETURN_URL=http://localhost:3000/webpay/return
       - TRANSBANK_FINAL_URL=http://localhost:80/payment/result
+      - AWS_SES_REGION=us-east-1
+      - SES_FROM_EMAIL=tu-email-verificado@gmail.com
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
     volumes:
       - ./mqtt-client:/app/mqtt-client
     restart: unless-stopped

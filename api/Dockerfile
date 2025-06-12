@@ -9,6 +9,7 @@ RUN npm install
 RUN npm install express-oauth2-jwt-bearer
 RUN npm install uuid auth0@latest node-fetch@2 axios
 RUN npm install newrelic --save
+RUN npm install @aws-sdk/client-ses
 
 # Copiar NewRelic config
 COPY ./api/newrelic.cjs ./newrelic.cjs

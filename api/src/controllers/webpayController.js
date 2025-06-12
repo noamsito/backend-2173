@@ -1,6 +1,7 @@
 import { TransbankService } from "../services/webpayService.js";
 import { Pool } from 'pg';
 import axios from 'axios';
+import EmailService from '../services/emailService.js';
 
 const pool = new Pool({
   user: process.env.DB_USER || 'postgres',
@@ -291,7 +292,7 @@ export class WebpayController {
         console.error('❌ Error enviando validación al broker MQTT:', mqttError);
         // No fallar la compra por esto
       }
-
+  
       try {
         await client.query(`
           UPDATE stocks 
@@ -338,6 +339,68 @@ export class WebpayController {
             event_text: `Compraste ${quantity} acciones de ${symbol} por un total de $${amount.toFixed(2)}.`
           })
         ]);
+      }
+      
+      // 5. ✅ NUEVO: ENVIAR CORREO DE CONFIRMACIÓN
+      try {
+        // Importar EmailService dinámicamente
+        const { default: EmailService } = await import('../services/emailService.js');
+        
+        // Obtener datos del usuario
+        const userQuery = `
+          SELECT name, email FROM users 
+          WHERE id = $1
+        `;
+        const userResult = await client.query(userQuery, [user_id]);
+        
+        if (userResult.rows.length > 0) {
+          const user = userResult.rows[0];
+          
+          if (user.email) {
+            console.log(`📧 Enviando correo de confirmación a: ${user.email}`);
+            
+            const purchaseData = {
+              symbol: symbol,
+              quantity: quantity,
+              totalAmount: amount,
+              requestId: request_id
+            };
+            
+            const emailResult = await EmailService.sendPurchaseConfirmation(
+              user.email,
+              user.name || 'Usuario',
+              purchaseData
+            );
+            
+            if (emailResult.success) {
+              console.log(`✅ Correo enviado exitosamente: ${emailResult.messageId}`);
+              
+              // Registrar evento de correo enviado
+              await client.query(`
+                INSERT INTO events (type, details)
+                VALUES ($1, $2)
+              `, [
+                'EMAIL_SENT',
+                JSON.stringify({
+                  request_id: request_id,
+                  user_email: user.email,
+                  message_id: emailResult.messageId,
+                  email_type: 'purchase_confirmation',
+                  timestamp: new Date().toISOString()
+                })
+              ]);
+            } else {
+              console.error(`❌ Error enviando correo: ${emailResult.error}`);
+            }
+          } else {
+            console.warn(`⚠️ Usuario ${user_id} no tiene email registrado`);
+          }
+        } else {
+          console.error(`❌ Usuario ${user_id} no encontrado`);
+        }
+      } catch (emailError) {
+        console.error('❌ Error en proceso de envío de correo:', emailError);
+        // No fallar la compra por errores de correo
       }
       
       return { success: true };
