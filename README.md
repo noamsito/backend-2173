@@ -322,3 +322,355 @@ JobMaster listening on port 4000
 
 ---
 
+## Instalación y ejecución con Docker
+
+### 1. Construir y ejecutar con Docker Compose
+
+```bash
+# Limpiar y reconstruir los contenedores
+docker-compose down && docker-compose build --no-cache && docker-compose up
+```
+
+### 2. Variables de entorno necesarias
+
+Crea un archivo `.env` en la carpeta `api/` con:
+```
+AUTH0_DOMAIN=tu-dominio-auth0
+AUTH0_AUDIENCE=tu-audience
+# ... otras variables
+```
+
+## Puntos obtenidos en E2
+- RF (Requisitos funcionales): 23 puntos
+- RNF (Requisitos no funcionales): 30 puntos  
+- HTTPS/SSL: 15 puntos
+- **Total: 68 puntos**
+
+---
+
+## NUEVAS FUNCIONALIDADES E3 - SISTEMA DE SUBASTAS E INTERCAMBIOS
+
+### ⚠️ IMPORTANTE: INICIALIZACIÓN AUTOMÁTICA
+
+**Las tablas de subastas e intercambios se crean automáticamente** al iniciar el sistema:
+1. El archivo `db/tables.sql` contiene todas las definiciones
+2. El servidor ejecuta `initializeDatabase()` al arrancar
+3. No se requiere intervención manual
+
+Si necesitas reiniciar la base de datos:
+```bash
+docker-compose down -v  # Elimina volúmenes
+docker-compose up -d    # Recrea todo desde cero
+```
+
+### 🔨 Sistema de Subastas (RF04 - 3 puntos)
+
+#### Endpoints de Subastas
+
+##### Crear una subasta (solo admin)
+```http
+POST /auctions
+Authorization: Bearer {token}
+Content-Type: application/json
+
+{
+  "symbol": "AAPL",
+  "quantity": 100,
+  "starting_price": 150.00,
+  "duration_minutes": 30
+}
+```
+
+##### Obtener subastas activas
+```http
+GET /auctions
+```
+**Respuesta:**
+```json
+{
+  "status": "success",
+  "auctions": [
+    {
+      "id": "uuid",
+      "group_id": 1,
+      "symbol": "AAPL",
+      "quantity": 100,
+      "starting_price": 150.00,
+      "current_price": 175.00,
+      "status": "ACTIVE",
+      "end_time": "2025-06-10T15:30:00Z",
+      "bid_count": 5,
+      "highest_bid": 175.00
+    }
+  ]
+}
+```
+
+##### Hacer una oferta en una subasta
+```http
+POST /auctions/{auction_id}/bid
+Authorization: Bearer {token}
+Content-Type: application/json
+
+{
+  "bid_amount": 180.00
+}
+```
+
+##### Cerrar una subasta (admin)
+```http
+POST /auctions/{auction_id}/close
+Authorization: Bearer {token}
+```
+
+### 🤝 Sistema de Intercambios (RF05 - 3 puntos)
+
+#### Endpoints de Intercambios
+
+##### Proponer un intercambio (solo admin)
+```http
+POST /exchanges
+Authorization: Bearer {token}
+Content-Type: application/json
+
+{
+  "target_group_id": 2,
+  "offered_symbol": "AAPL",
+  "offered_quantity": 50,
+  "requested_symbol": "GOOGL",
+  "requested_quantity": 30
+}
+```
+
+##### Responder a una propuesta de intercambio
+```http
+POST /exchanges/{exchange_id}/respond
+Authorization: Bearer {token}
+Content-Type: application/json
+
+{
+  "action": "accept", // o "reject"
+  "reason": "Motivo del rechazo (opcional)"
+}
+```
+
+##### Obtener intercambios pendientes
+```http
+GET /exchanges/pending
+Authorization: Bearer {token}
+```
+
+##### Obtener historial de intercambios
+```http
+GET /exchanges/history
+Authorization: Bearer {token}
+```
+
+### 📡 Integración MQTT (RNF04 y RNF05 - 10 puntos)
+
+#### Canal stocks/auctions
+
+El sistema se suscribe al canal `stocks/auctions` para:
+
+1. **Recibir mensajes de otros grupos** (RNF04 - 5 puntos):
+   - Subastas creadas por otros grupos
+   - Ofertas en subastas
+   - Resultados de subastas
+   - Propuestas de intercambio
+   - Respuestas a intercambios
+
+2. **Publicar mensajes propios** (RNF05 - 5 puntos):
+   - Crear subastas propias
+   - Hacer ofertas en subastas
+   - Cerrar subastas
+   - Proponer intercambios
+   - Responder a intercambios
+
+#### Formato de mensajes MQTT
+
+##### Subasta creada
+```json
+{
+  "type": "AUCTION_CREATED",
+  "auction_id": "uuid",
+  "group_id": 1,
+  "symbol": "AAPL",
+  "quantity": 100,
+  "starting_price": 150.00,
+  "end_time": "2025-06-10T15:30:00Z",
+  "timestamp": "2025-06-10T15:00:00Z"
+}
+```
+
+##### Propuesta de intercambio
+```json
+{
+  "type": "EXCHANGE_PROPOSAL",
+  "exchange_id": "uuid",
+  "origin_group_id": 1,
+  "target_group_id": 2,
+  "offered_symbol": "AAPL",
+  "offered_quantity": 50,
+  "requested_symbol": "GOOGL",
+  "requested_quantity": 30,
+  "timestamp": "2025-06-10T15:00:00Z"
+}
+```
+
+### 🗄️ Nuevas Tablas en Base de Datos
+
+```sql
+-- Tabla de subastas
+CREATE TABLE auctions (
+    id UUID PRIMARY KEY,
+    group_id INTEGER NOT NULL,
+    symbol VARCHAR(10) NOT NULL,
+    quantity INTEGER NOT NULL,
+    starting_price DECIMAL(10, 2) NOT NULL,
+    current_price DECIMAL(10, 2) NOT NULL,
+    status VARCHAR(20) NOT NULL,
+    winner_group_id INTEGER,
+    start_time TIMESTAMP NOT NULL,
+    end_time TIMESTAMP NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Tabla de ofertas en subastas
+CREATE TABLE auction_bids (
+    id UUID PRIMARY KEY,
+    auction_id UUID REFERENCES auctions(id),
+    bidder_group_id INTEGER NOT NULL,
+    bid_amount DECIMAL(10, 2) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Tabla de intercambios
+CREATE TABLE exchanges (
+    id UUID PRIMARY KEY,
+    origin_group_id INTEGER NOT NULL,
+    target_group_id INTEGER NOT NULL,
+    offered_symbol VARCHAR(10) NOT NULL,
+    offered_quantity INTEGER NOT NULL,
+    requested_symbol VARCHAR(10) NOT NULL,
+    requested_quantity INTEGER NOT NULL,
+    status VARCHAR(20) NOT NULL,
+    reason TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+### 🎯 Resumen de Implementación E3
+
+- **RF04**: Sistema de subastas completo con interface admin ✅
+- **RF05**: Sistema de intercambios con lógica de propuesta/respuesta ✅
+- **RNF04**: Recepción de mensajes del canal stocks/auctions ✅
+- **RNF05**: Publicación de mensajes al canal stocks/auctions ✅
+
+**Total puntos implementados: 16 puntos esenciales**
+
+---
+
+## 📖 Guía de Uso - Subastas e Intercambios
+
+### 🚀 Inicio Rápido
+
+1. **Levantar el sistema**:
+   ```bash
+   docker-compose down -v  # Limpiar todo
+   docker-compose up -d    # Iniciar servicios
+   ```
+
+2. **Verificar que todo esté funcionando**:
+   ```bash
+   ./verify-system.sh
+   ```
+
+3. **Acceder al frontend**:
+   - Abrir navegador en `http://localhost:80`
+   - Iniciar sesión con Auth0
+
+### 🏛️ Usar el Sistema de Subastas
+
+1. **Ver subastas activas**: 
+   - Navegar a "🏛️ Subastas" en el menú
+   - Las subastas se actualizan automáticamente cada 30 segundos
+
+2. **Crear una subasta**:
+   - Click en "➕ Crear Subasta"
+   - Llenar el formulario con:
+     - Símbolo de la acción (ej: AAPL)
+     - Cantidad de acciones
+     - Precio inicial
+     - Duración en minutos
+   - Click en "🚀 Crear y Publicar"
+
+3. **Hacer una oferta**:
+   - Click en "💸 Hacer Oferta" en cualquier subasta activa
+   - Ingresar el monto (debe ser mayor al precio actual)
+   - Confirmar la oferta
+
+4. **Cerrar una subasta**:
+   - Click en "🔒 Cerrar" (disponible para el creador)
+   - La subasta se cerrará y el ganador será notificado
+
+### 🔄 Usar el Sistema de Intercambios
+
+1. **Ver intercambios**:
+   - Navegar a "🔄 Intercambios" en el menú
+   - Pestaña "📥 Pendientes": propuestas activas
+   - Pestaña "📋 Historial": intercambios completados
+
+2. **Proponer un intercambio**:
+   - Click en "➕ Proponer Intercambio"
+   - Especificar:
+     - Grupo objetivo (número del grupo)
+     - Lo que ofreces (símbolo y cantidad)
+     - Lo que solicitas (símbolo y cantidad)
+   - Click en "🚀 Enviar Propuesta"
+
+3. **Responder a propuestas**:
+   - En la pestaña "Pendientes"
+   - Click en "✅ Aceptar" o "❌ Rechazar"
+   - Si rechazas, puedes agregar un motivo
+
+### 🔐 Permisos y Roles
+
+**Nota importante**: Aunque el frontend muestra los botones a todos los usuarios autenticados, el backend valida los permisos reales. Si recibes un error 403, significa que necesitas permisos de administrador.
+
+Para convertir tu usuario en administrador:
+```bash
+docker exec -it backend-2173-db-1 psql -U postgres -d stock_data -c "UPDATE users SET role = 'admin' WHERE email = 'tu-email@ejemplo.com';"
+```
+
+### 📡 Comunicación MQTT
+
+El sistema se comunica automáticamente con otros grupos:
+- **Subastas creadas** se publican al broker
+- **Propuestas de intercambio** se envían a los grupos objetivo
+- **Respuestas** se notifican automáticamente
+
+### 🐛 Solución de Problemas
+
+1. **No aparecen los botones**:
+   - Verificar que estés autenticado
+   - Hacer hard refresh (Ctrl+Shift+R)
+   - Reiniciar el servidor API
+
+2. **Error 403 Forbidden**:
+   - Tu usuario necesita rol de administrador
+   - Ejecutar el comando SQL de arriba
+
+3. **No se cargan las subastas**:
+   - Verificar que el backend esté corriendo
+   - Revisar la consola del navegador
+   - Verificar que las tablas existan en la BD
+
+4. **Error al crear subasta/intercambio**:
+   - Verificar que tengas acciones del símbolo
+   - Revisar que los valores sean válidos
+   - Verificar conexión MQTT
+
+---
+
