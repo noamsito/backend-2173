@@ -14,9 +14,9 @@ app.use(express.json());
 
 // Configurar Cola - Compatible con worker.js existente
 const estimacionesQueue = new Queue('estimaciones', {
-  connection: { 
-    host: 'localhost',
-    port: 6379
+  connection: {
+    host: REDIS_URL.includes('redis://') ? REDIS_URL.split('://')[1].split(':')[0] : 'localhost',
+    port: REDIS_URL.includes('redis://') ? parseInt(REDIS_URL.split(':')[2] || '6379') : 6379
   }
 });
 
@@ -41,7 +41,7 @@ app.get('/heartbeat', (req, res) => {
     uptime: process.uptime(),
     queue: {
       name: 'estimaciones',
-      connection: 'redis://localhost:6379'
+      connection: REDIS_URL
     }
   });
 });

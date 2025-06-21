@@ -6,9 +6,11 @@ import cors from 'cors';
 // Lista completa de orígenes permitidos
 const allowedOrigins = [
   // Desarrollo local
+  'http://localhost',       // Sin puerto (puerto 80 por defecto)
   'http://localhost:80',
   'http://localhost:3000',
   'http://localhost:5173',
+  'http://127.0.0.1',       // Sin puerto (puerto 80 por defecto)
   'http://127.0.0.1:80',
   'http://127.0.0.1:3000',
   'http://127.0.0.1:5173',
@@ -46,15 +48,23 @@ export const apiGatewayMiddleware = (req, res, next) => {
 // Configuración CORS optimizada
 export const corsOptions = {
   origin: function (origin, callback) {
+    console.log(`🔍 CORS Check - Origin received: "${origin}"`);
+    console.log(`🔍 CORS Check - Type: ${typeof origin}`);
+    console.log(`🔍 CORS Check - Allowed origins:`, allowedOrigins);
+    
     // Permitir requests sin origin (aplicaciones móviles, Postman, etc.)
-    if (!origin) return callback(null, true);
+    if (!origin) {
+      console.log(`✅ CORS Allow - No origin (mobile/postman)`);
+      return callback(null, true);
+    }
     
     // Verificar si el origin está en la lista permitida
     if (allowedOrigins.indexOf(origin) !== -1) {
+      console.log(`✅ CORS Allow - Origin found in allowed list`);
       callback(null, true);
     } else {
-      console.warn(`🚫 CORS blocked origin: ${origin}`);
-      console.log(`✅ Allowed origins:`, allowedOrigins);
+      console.warn(`🚫 CORS blocked origin: "${origin}"`);
+      console.log(`🔍 Exact match check:`, allowedOrigins.map(allowed => `"${allowed}" === "${origin}": ${allowed === origin}`));
       callback(new Error('Not allowed by CORS'));
     }
   },

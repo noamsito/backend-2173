@@ -123,8 +123,8 @@ const worker = new Worker('estimaciones', async (job) => {
   }
 }, {
   connection: {
-    host: 'localhost',
-    port: 6379
+    host: REDIS_URL.includes('redis://') ? REDIS_URL.split('://')[1].split(':')[0] : 'localhost',
+    port: REDIS_URL.includes('redis://') ? parseInt(REDIS_URL.split(':')[2] || '6379') : 6379
   },
   concurrency: CONCURRENCY
 });

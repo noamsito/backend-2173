@@ -20,6 +20,7 @@ const options = {
 const UPDATES_TOPIC = "stocks/updates";
 const REQUESTS_TOPIC = "stocks/requests";
 const VALIDATION_TOPIC = 'stocks/validation';
+const AUCTIONS_TOPIC = "stocks/auctions"; // NUEVO: Canal de subastas
 const GROUP_ID = process.env.GROUP_ID || "1"; // Cambiar por tu ID de grupo
 
 console.log("Conectando a MQTT broker:", options);
@@ -45,11 +46,10 @@ client.on("connect", () => {
     console.log("Conectado a MQTT broker");
     reconnectCount = 0; // Resetear contador de reconexión
 
-    // Suscribir a ambos canales
-    
-    client.subscribe([UPDATES_TOPIC, REQUESTS_TOPIC, VALIDATION_TOPIC], (err) => {
+    // Suscribir a todos los canales incluyendo subastas
+    client.subscribe([UPDATES_TOPIC, REQUESTS_TOPIC, VALIDATION_TOPIC, AUCTIONS_TOPIC], (err) => {
         if (!err) {
-            console.log("Suscrito a:", UPDATES_TOPIC, REQUESTS_TOPIC);
+            console.log("Suscrito a:", UPDATES_TOPIC, REQUESTS_TOPIC, VALIDATION_TOPIC, AUCTIONS_TOPIC);
         } else {
             console.error("Error de suscripción:", err);
         }
@@ -68,6 +68,9 @@ client.on("message", (topic, message) => {
         handlePurchaseMessage(messageStr);
     } else if (topic === VALIDATION_TOPIC) {
         handleValidationMessage(messageStr);
+    } else if (topic === AUCTIONS_TOPIC) {
+        // NUEVO: Manejo de mensajes de subastas e intercambios
+        handleAuctionMessage(messageStr);
     }
 });
 
@@ -369,6 +372,141 @@ function publishPurchaseRequest(requestData) {
     client.publish(REQUESTS_TOPIC, JSON.stringify(message));
     console.log("Solicitud de compra publicada:", message);
     return requestId;
+}
+
+// NUEVO: Función para manejar mensajes del canal de subastas
+async function handleAuctionMessage(messageStr) {
+    try {
+        const auctionData = JSON.parse(messageStr);
+        console.log("Mensaje de subasta recibido:", auctionData);
+        
+        // Verificar que el mensaje tenga un tipo válido
+        if (!auctionData.type) {
+            console.log("Mensaje de subasta sin tipo, ignorando");
+            return;
+        }
+        
+        switch (auctionData.type) {
+            case 'AUCTION_CREATED':
+                await handleAuctionCreated(auctionData);
+                break;
+            case 'AUCTION_BID':
+                await handleAuctionBid(auctionData);
+                break;
+            case 'AUCTION_CLOSED':
+                await handleAuctionClosed(auctionData);
+                break;
+            case 'EXCHANGE_PROPOSAL':
+                await handleExchangeProposal(auctionData);
+                break;
+            case 'EXCHANGE_RESPONSE':
+                await handleExchangeResponse(auctionData);
+                break;
+            default:
+                console.log(`Tipo de mensaje de subasta desconocido: ${auctionData.type}`);
+        }
+    } catch (err) {
+        console.error("Error procesando mensaje de subasta:", err);
+    }
+}
+
+// NUEVO: Manejar creación de subastas
+async function handleAuctionCreated(auctionData) {
+    try {
+        // Verificar si la subasta es de otro grupo
+        if (String(auctionData.group_id) !== String(GROUP_ID)) {
+            console.log(`Subasta creada por grupo ${auctionData.group_id}: ${auctionData.symbol}`);
+            
+            // Enviar a la API para procesar
+            const endpointUrl = "http://api:3000/auctions/external";
+            await fetchWithRetry(endpointUrl, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(auctionData)
+            }, "subasta externa");
+        }
+    } catch (err) {
+        console.error("Error procesando subasta creada:", err);
+    }
+}
+
+// NUEVO: Manejar ofertas en subastas
+async function handleAuctionBid(auctionData) {
+    try {
+        console.log(`Oferta recibida para subasta ${auctionData.auction_id}: ${auctionData.bid_amount}`);
+        // Solo procesamos ofertas en nuestras subastas
+        console.log("Oferta externa procesada localmente");
+    } catch (err) {
+        console.error("Error procesando oferta de subasta:", err);
+    }
+}
+
+// NUEVO: Manejar cierre de subastas
+async function handleAuctionClosed(auctionData) {
+    try {
+        console.log(`Subasta ${auctionData.auction_id} cerrada`);
+        
+        // Si ganamos la subasta, actualizar nuestro inventario
+        if (String(auctionData.winner_group_id) === String(GROUP_ID)) {
+            console.log(`🎉 ¡Ganamos la subasta! ${auctionData.quantity} ${auctionData.symbol}`);
+            
+            // Registrar la ganancia localmente
+            await logEvent('AUCTION_WON', {
+                auction_id: auctionData.auction_id,
+                symbol: auctionData.symbol,
+                quantity: auctionData.quantity,
+                final_price: auctionData.final_price
+            });
+        }
+    } catch (err) {
+        console.error("Error procesando cierre de subasta:", err);
+    }
+}
+
+// NUEVO: Manejar propuestas de intercambio
+async function handleExchangeProposal(auctionData) {
+    try {
+        // Verificar si la propuesta es para nuestro grupo
+        if (String(auctionData.target_group_id) === String(GROUP_ID)) {
+            console.log(`Propuesta de intercambio recibida del grupo ${auctionData.origin_group_id}`);
+            
+            // Enviar a la API para procesar
+            const endpointUrl = "http://api:3000/exchanges/proposal";
+            await fetchWithRetry(endpointUrl, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(auctionData)
+            }, "propuesta de intercambio");
+        }
+    } catch (err) {
+        console.error("Error procesando propuesta de intercambio:", err);
+    }
+}
+
+// NUEVO: Manejar respuestas de intercambio
+async function handleExchangeResponse(auctionData) {
+    try {
+        // Verificar si la respuesta es para una propuesta nuestra
+        if (String(auctionData.origin_group_id) === String(GROUP_ID)) {
+            console.log(`Respuesta de intercambio recibida: ${auctionData.exchange_id} - ${auctionData.status}`);
+            
+            // Enviar a la API para procesar
+            const endpointUrl = "http://api:3000/exchanges/response";
+            await fetchWithRetry(endpointUrl, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(auctionData)
+            }, "respuesta de intercambio");
+        }
+    } catch (err) {
+        console.error("Error procesando respuesta de intercambio:", err);
+    }
+}
+
+// Función para publicar mensajes de subastas
+function publishAuctionMessage(messageData) {
+    client.publish(AUCTIONS_TOPIC, JSON.stringify(messageData));
+    console.log("Mensaje de subasta publicado:", messageData);
 }
 
 

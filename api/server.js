@@ -12,6 +12,9 @@ import sequelize from './db/db.js';
 import { TransbankService } from './src/services/webpayService.js';
 import webpayRoutes from './src/routes/webpayRoutes.js';
 import { corsOptions, customCorsMiddleware, webpayCorsmiddleware } from './cors-configuration.js';
+import * as auctionController from './src/controllers/auctionController.js';
+import * as exchangeController from './src/controllers/exchangeController.js';
+import { initializeDatabase } from './src/utils/initDatabase.js';
 
 const Pool = pg.Pool;
 const app = express();
@@ -87,6 +90,9 @@ const pool = new Pool({
     password: process.env.DB_PASSWORD || 'password',
 });
 
+// Hacer que el pool esté disponible para los controladores
+app.locals.pool = pool;
+
 // Crear middleware de sincronización de usuarios
 const syncUser = createSyncUserMiddleware(pool);
 const GROUP_ID = process.env.GROUP_ID || "1";
@@ -94,9 +100,30 @@ const GROUP_ID = process.env.GROUP_ID || "1";
 // CORREGIR: Configurar middleware de autenticación Auth0 con las variables correctas
 const checkJwt = auth({
     audience: process.env.AUTH0_AUDIENCE || 'https://stockmarket-api/',
-    issuerBaseURL: `https://${process.env.AUTH0_DOMAIN}` || 'https://dev-ouxdigl1l6bn6n3r.us.auth0.com/',
+    issuerBaseURL: `https://${process.env.AUTH0_DOMAIN || 'dev-ouxdigl1l6bn6n3r.us.auth0.com'}`,
     tokenSigningAlg: 'RS256'
 });
+
+// Middleware para verificar si el usuario es admin
+const checkAdmin = async (req, res, next) => {
+    try {
+        // Verificar si el usuario tiene rol de admin
+        const userQuery = `
+            SELECT role FROM users WHERE id = $1
+        `;
+        const result = await pool.query(userQuery, [req.userId]);
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: "Usuario no encontrado" });
+        }
+        
+        req.isAdmin = result.rows[0].role === 'admin';
+        next();
+    } catch (error) {
+        console.error("Error verificando rol de admin:", error);
+        res.status(500).json({ error: "Error interno del servidor" });
+    }
+};
 
 const client = await pool.connect();
 
@@ -586,7 +613,11 @@ app.post('/wallet/deposit', checkJwt, syncUser, async (req, res) => {
             new_balance: newBalance 
         });
         
-        res.json({ balance: newBalance });
+        res.json({ 
+            success: true,
+            message: `Depósito de $${amountValue} realizado exitosamente`,
+            balance: newBalance 
+        });
     } catch (error) {
         console.error("Error al depositar en billetera:", error);
         res.status(500).json({ 
@@ -618,8 +649,7 @@ app.get('/wallet/balance', checkJwt, syncUser, async (req, res) => {
 
 // ENDPOINTS DE COMPRA DE ACCIONES ===========================================
 
-// Comprar acciones (versión mejorada)
-// Comprar acciones (versión corregida para WebPay)
+// Comprar acciones (versión simplificada - CON AUTENTICACIÓN RESTAURADA)
 app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
     try {
         const { symbol, quantity } = req.body;
@@ -628,7 +658,7 @@ app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
             return res.status(400).json({ error: "Solicitud de compra inválida" });
         }
         
-        console.log(`Procesando solicitud de compra: ${quantity} acciones de ${symbol}`);
+        console.log(`🛒 Procesando compra directa: ${quantity} acciones de ${symbol}`);
         
         // Obtener precio actual y disponibilidad de la acción
         const stockQuery = `
@@ -652,104 +682,100 @@ app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
         
         const totalCost = stock.price * quantity;
 
-        // ✅ SIN VERIFICACIÓN DE WALLET - El pago se valida via WebPay
-        console.log(`💰 Total a pagar: $${totalCost} (será validado por WebPay)`);
+        // Verificar saldo del usuario
+        const balanceQuery = `SELECT balance FROM wallet WHERE user_id = $1`;
+        const balanceResult = await client.query(balanceQuery, [req.userId]);
         
-        // Generar UUID para la solicitud
-        const requestId = uuidv4();
-        const shortRequestId = requestId.split('-')[0]; 
-        const buyOrder = `${symbol}-${shortRequestId}`;
-        const sessionId = `session-${req.userId}-${Date.now()}`;
-        const returnUrl = process.env.TRANSBANK_RETURN_URL || 'https://r12c7vfhig.execute-api.us-east-1.amazonaws.com/prod/webpay/return';
-
-        // 1. CREAR TRANSACCIÓN WEBPAY
-        const webpayResult = await TransbankService.createTransaction(
-            buyOrder,
-            sessionId,
-            totalCost,
-            returnUrl
-        );
+        if (balanceResult.rows.length === 0) {
+            return res.status(404).json({ error: "Usuario no encontrado" });
+        }
         
-        if (!webpayResult.success) {
-            console.error("Error al crear transacción webpay:", webpayResult.error);
-            return res.status(500).json({
-                error: "Error al procesar el pago",
-                details: webpayResult.error
+        const userBalance = balanceResult.rows[0].balance;
+        
+        if (userBalance < totalCost) {
+            return res.status(400).json({ 
+                error: `Saldo insuficiente. Necesitas $${totalCost.toLocaleString()} pero tienes $${userBalance.toLocaleString()}` 
             });
         }
 
-        console.log(`Transacción WebPay creada exitosamente: ${webpayResult.token}`);
-
-        // 2. GUARDAR TRANSACCIÓN EN BASE DE DATOS
-        const webpayTransactionQuery = `
-            INSERT INTO webpay_transactions
-            (user_id, buy_order, session_id, token_ws, amount, status, symbol, quantity, request_id, created_at)
-            VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7, $8, NOW())
-            RETURNING id
-        `;
+        console.log(`💰 Costo total: $${totalCost}, saldo usuario: $${userBalance}`);
         
-        await client.query(webpayTransactionQuery, [
-            req.userId,
-            buyOrder,
-            sessionId,
-            webpayResult.token,
-            totalCost,
-            symbol,
-            quantity,
-            requestId
-        ]);
+        // Generar UUID para la solicitud
+        const requestId = uuidv4();
 
-        // 3. CREAR SOLICITUD DE COMPRA EN PURCHASE_REQUESTS
-        const purchaseQuery = `
-            INSERT INTO purchase_requests 
-            (request_id, user_id, symbol, quantity, price, status) 
-            VALUES ($1, $2, $3, $4, $5, 'PENDING')
-            RETURNING id
-        `;
-        
-        await client.query(purchaseQuery, [
-            requestId, 
-            req.userId,
-            symbol, 
-            quantity, 
-            stock.price
-        ]);
+        // Iniciar transacción de base de datos
+        await client.query('BEGIN');
 
-        // 4. RESERVAR ACCIONES TEMPORALMENTE
-        console.log(`📊 Acciones disponibles: ${stock.quantity}, solicitadas: ${quantity}`);
+        try {
+            // 1. Descontar del saldo del usuario
+            await client.query(
+                `UPDATE wallet SET balance = balance - $1 WHERE user_id = $2`,
+                [totalCost, req.userId]
+            );
 
-        console.log(`💾 Solicitud de compra creada: ${requestId}, esperando confirmación de pago WebPay`);
+            // 2. Reducir cantidad de acciones disponibles
+            await client.query(
+                `UPDATE stocks SET quantity = quantity - $1 WHERE id = $2`,
+                [quantity, stock.id]
+            );
 
-        // 6. REGISTRAR EVENTO
-        await logEvent('PURCHASE_REQUEST', {
-            request_id: requestId,
-            user_id: req.userId,
-            symbol: symbol,
-            quantity: quantity,
-            price: stock.price,
-            group_id: GROUP_ID,
-            webpay_token: webpayResult.token,
-            deposit_token: webpayResult.token
-        });
-        
-        // 7. RETORNAR DATOS PARA REDIRECCIÓN A WEBPAY
-        res.json({
-            message: "Transacción de pago creada exitosamente",
-            requiresPayment: true,
-            webpayUrl: webpayResult.url,
-            webpayToken: webpayResult.token,
-            request_id: requestId
-        });
+            // 3. Crear registro de compra
+            const purchaseQuery = `
+                INSERT INTO purchase_requests 
+                (request_id, user_id, symbol, quantity, price, status) 
+                VALUES ($1, $2, $3, $4, $5, 'ACCEPTED')
+                RETURNING id
+            `;
+            
+            await client.query(purchaseQuery, [
+                requestId, 
+                req.userId,
+                symbol, 
+                quantity, 
+                stock.price
+            ]);
+
+            // 4. Registrar evento
+            await logEvent('PURCHASE_DIRECT', {
+                request_id: requestId,
+                user_id: req.userId,
+                symbol: symbol,
+                quantity: quantity,
+                price: stock.price,
+                total_cost: totalCost,
+                group_id: GROUP_ID
+            });
+
+            // Confirmar transacción
+            await client.query('COMMIT');
+
+            console.log(`✅ Compra exitosa: ${quantity} acciones de ${symbol} por $${totalCost}`);
+            
+            res.json({
+                message: `Compra exitosa: ${quantity} acciones de ${symbol} por $${totalCost.toLocaleString()}`,
+                success: true,
+                request_id: requestId,
+                symbol: symbol,
+                quantity: quantity,
+                totalCost: totalCost,
+                newBalance: userBalance - totalCost
+            });
+            
+        } catch (dbError) {
+            // Revertir transacción en caso de error
+            await client.query('ROLLBACK');
+            throw dbError;
+        }
         
     } catch (error) {
-        console.error("Error procesando compra:", error);
+        console.error("❌ Error procesando compra:", error);
         res.status(500).json({ error: "Error interno del servidor" });
     }
 });
 
 
 
-// Obtener compras del usuario (versión mejorada)
+// Obtener compras del usuario (versión mejorada) - CON AUTENTICACIÓN RESTAURADA
 app.get('/purchases', checkJwt, syncUser, async (req, res) => {
     try {
         // Obtener compras del usuario con una consulta mejorada que evita duplicados
@@ -1320,6 +1346,136 @@ app.get('/purchase/:requestId/estimation', checkJwt, syncUser, async (req, res) 
         res.status(500).json({ error: 'Error obteniendo estimación de compra' });
     }
 });
+// NUEVAS RUTAS PARA SUBASTAS (RF04)
+// Crear una subasta
+app.post('/auctions', checkJwt, syncUser, auctionController.createAuction);
+
+// Obtener subastas activas
+app.get('/auctions', auctionController.getActiveAuctions);
+
+// Hacer una oferta en una subasta
+app.post('/auctions/:auction_id/bid', checkJwt, syncUser, auctionController.placeBid);
+
+// Cerrar una subasta
+app.post('/auctions/:auction_id/close', checkJwt, syncUser, auctionController.closeAuction);
+
+// Procesar subastas externas (desde MQTT)
+app.post('/auctions/external', auctionController.processExternalAuction);
+
+// NUEVAS RUTAS PARA INTERCAMBIOS (RF05)
+// Proponer un intercambio
+app.post('/exchanges', checkJwt, syncUser, exchangeController.proposeExchange);
+
+// Responder a un intercambio (aceptar/rechazar)
+app.post('/exchanges/:exchange_id/respond', checkJwt, syncUser, exchangeController.respondToExchange);
+
+// Obtener intercambios pendientes
+app.get('/exchanges/pending', checkJwt, syncUser, exchangeController.getPendingExchanges);
+
+// Obtener historial de intercambios
+app.get('/exchanges/history', checkJwt, syncUser, exchangeController.getExchangeHistory);
+
+// Procesar propuestas externas (desde MQTT)
+app.post('/exchanges/proposal', exchangeController.processExternalProposal);
+
+// Procesar respuestas externas (desde MQTT)
+app.post('/exchanges/response', exchangeController.processExternalResponse);
+
+// Endpoint simple de health check
+app.get('/health', (req, res) => {
+    res.json({ 
+        status: 'ok', 
+        timestamp: new Date().toISOString(),
+        service: 'StockMarketU API'
+    });
+});
+
+// Endpoint temporal de administración para agregar dinero a billeteras
+app.post('/admin/add-money', async (req, res) => {
+    try {
+        const { email, amount } = req.body;
+        
+        if (!email || !amount || isNaN(parseFloat(amount)) || parseFloat(amount) <= 0) {
+            return res.status(400).json({ 
+                error: "Email y monto válido son requeridos",
+                example: { email: "usuario@ejemplo.com", amount: 1000000000 }
+            });
+        }
+        
+        const amountValue = parseFloat(amount);
+        
+        // Buscar el usuario por email
+        const userQuery = `SELECT id FROM users WHERE email = $1`;
+        const userResult = await client.query(userQuery, [email]);
+        
+        if (userResult.rows.length === 0) {
+            return res.status(404).json({ 
+                error: `Usuario con email ${email} no encontrado`,
+                suggestion: "El usuario debe haber iniciado sesión al menos una vez para existir en la base de datos"
+            });
+        }
+        
+        const userId = userResult.rows[0].id;
+        
+        // Verificar si ya tiene billetera
+        const walletCheckQuery = `SELECT balance FROM wallet WHERE user_id = $1`;
+        const walletCheckResult = await client.query(walletCheckQuery, [userId]);
+        
+        if (walletCheckResult.rows.length === 0) {
+            // Crear billetera si no existe
+            await client.query(`
+                INSERT INTO wallet (user_id, balance, created_at, updated_at)
+                VALUES ($1, $2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            `, [userId, amountValue]);
+            
+            console.log(`💰 Billetera creada para ${email} con $${amountValue}`);
+        } else {
+            // Actualizar billetera existente
+            const updateQuery = `
+                UPDATE wallet
+                SET balance = balance + $2, updated_at = CURRENT_TIMESTAMP
+                WHERE user_id = $1
+                RETURNING balance
+            `;
+            
+            const updateResult = await client.query(updateQuery, [userId, amountValue]);
+            const newBalance = updateResult.rows[0].balance;
+            
+            console.log(`💰 $${amountValue} agregados a ${email}. Nuevo balance: $${newBalance}`);
+        }
+        
+        // Obtener balance final
+        const finalBalanceQuery = `SELECT balance FROM wallet WHERE user_id = $1`;
+        const finalBalanceResult = await client.query(finalBalanceQuery, [userId]);
+        const finalBalance = finalBalanceResult.rows[0].balance;
+        
+        // Registrar evento
+        await logEvent('ADMIN_WALLET_DEPOSIT', { 
+            target_email: email,
+            target_user_id: userId,
+            amount: amountValue, 
+            new_balance: finalBalance,
+            admin_action: true
+        });
+        
+        res.json({ 
+            success: true,
+            message: `$${amountValue.toLocaleString()} agregados exitosamente a ${email}`,
+            user_email: email,
+            user_id: userId,
+            amount_added: amountValue,
+            new_balance: finalBalance
+        });
+        
+    } catch (error) {
+        console.error("Error agregando dinero a billetera:", error);
+        res.status(500).json({ 
+            error: "Error interno del servidor", 
+            details: error.message 
+        });
+    }
+});
+
 app.listen(port, '0.0.0.0',() => {
     console.log(`Servidor ejecutándose en http://localhost:${port}`);
 });

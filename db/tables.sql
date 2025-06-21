@@ -127,3 +127,54 @@ ON purchase_requests(estimation_job_id);
 
 -- Comentario para tracking
 COMMENT ON COLUMN purchase_requests.estimation_job_id IS 'ID del job de estimación en el sistema de workers';
+
+-- NUEVAS TABLAS PARA SISTEMA DE SUBASTAS E INTERCAMBIOS (E3)
+
+-- Tabla para subastas
+CREATE TABLE IF NOT EXISTS auctions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    group_id INTEGER NOT NULL,
+    symbol VARCHAR(10) NOT NULL,
+    quantity INTEGER NOT NULL CHECK (quantity > 0),
+    starting_price DECIMAL(10, 2) NOT NULL CHECK (starting_price > 0),
+    current_price DECIMAL(10, 2) NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'CLOSED', 'CANCELLED')),
+    winner_group_id INTEGER,
+    start_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    end_time TIMESTAMP NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Tabla para ofertas en subastas
+CREATE TABLE IF NOT EXISTS auction_bids (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    auction_id UUID NOT NULL REFERENCES auctions(id) ON DELETE CASCADE,
+    bidder_group_id INTEGER NOT NULL,
+    bid_amount DECIMAL(10, 2) NOT NULL CHECK (bid_amount > 0),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Tabla para intercambios entre grupos
+CREATE TABLE IF NOT EXISTS exchanges (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    origin_group_id INTEGER NOT NULL,
+    target_group_id INTEGER NOT NULL,
+    offered_symbol VARCHAR(10) NOT NULL,
+    offered_quantity INTEGER NOT NULL CHECK (offered_quantity > 0),
+    requested_symbol VARCHAR(10) NOT NULL,
+    requested_quantity INTEGER NOT NULL CHECK (requested_quantity > 0),
+    status VARCHAR(20) NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'ACCEPTED', 'REJECTED', 'CANCELLED')),
+    reason TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Índices para mejorar performance
+CREATE INDEX idx_auctions_group_id ON auctions(group_id);
+CREATE INDEX idx_auctions_status ON auctions(status);
+CREATE INDEX idx_auctions_symbol ON auctions(symbol);
+CREATE INDEX idx_auction_bids_auction_id ON auction_bids(auction_id);
+CREATE INDEX idx_exchanges_origin_group ON exchanges(origin_group_id);
+CREATE INDEX idx_exchanges_target_group ON exchanges(target_group_id);
+CREATE INDEX idx_exchanges_status ON exchanges(status);
