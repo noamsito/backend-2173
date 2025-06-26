@@ -374,28 +374,32 @@ function publishPurchaseRequest(requestData) {
     return requestId;
 }
 
-// NUEVO: Función para manejar mensajes del canal de subastas
+// NUEVO: Función para manejar mensajes del canal de subastas siguiendo el formato exacto del enunciado
 async function handleAuctionMessage(messageStr) {
     try {
         const auctionData = JSON.parse(messageStr);
         console.log("Mensaje de subasta recibido:", auctionData);
         
-        // Verificar que el mensaje tenga un tipo válido
-        if (!auctionData.type) {
-            console.log("Mensaje de subasta sin tipo, ignorando");
-            return;
+        // Verificar si el mensaje tiene el formato del enunciado (con campo "operation")
+        if (auctionData.operation) {
+            switch (auctionData.operation) {
+                case 'offer':
+                    await handleOfferReceived(auctionData);
+                    break;
+                case 'proposal':
+                    await handleProposalReceived(auctionData);
+                    break;
+                case 'acceptance':
+                case 'rejection':
+                    await handleResponseReceived(auctionData);
+                    break;
+                default:
+                    console.log(`Operación desconocida: ${auctionData.operation}`);
+            }
         }
-        
+        // Mantener compatibilidad con formato anterior (para mensajes internos)
+        else if (auctionData.type) {
         switch (auctionData.type) {
-            case 'AUCTION_CREATED':
-                await handleAuctionCreated(auctionData);
-                break;
-            case 'AUCTION_BID':
-                await handleAuctionBid(auctionData);
-                break;
-            case 'AUCTION_CLOSED':
-                await handleAuctionClosed(auctionData);
-                break;
             case 'EXCHANGE_PROPOSAL':
                 await handleExchangeProposal(auctionData);
                 break;
@@ -404,13 +408,200 @@ async function handleAuctionMessage(messageStr) {
                 break;
             default:
                 console.log(`Tipo de mensaje de subasta desconocido: ${auctionData.type}`);
+            }
+        } else {
+            console.log("Mensaje de subasta sin tipo, ignorando");
         }
     } catch (err) {
         console.error("Error procesando mensaje de subasta:", err);
     }
 }
 
-// NUEVO: Manejar creación de subastas
+// NUEVO: Manejar ofertas recibidas (operation: "offer")
+async function handleOfferReceived(offerData) {
+    try {
+        // Verificar si la oferta es de otro grupo
+        if (String(offerData.group_id) !== String(GROUP_ID)) {
+            console.log(`📥 Oferta recibida del grupo ${offerData.group_id}: ${offerData.quantity} ${offerData.symbol}`);
+            
+            // Guardar oferta externa en la API
+            const endpointUrl = "http://api:3000/admin/external-offers";
+            await fetchWithRetry(endpointUrl, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    auction_id: offerData.auction_id,
+                    proposal_id: offerData.proposal_id || "",
+                    group_id: offerData.group_id,
+                    symbol: offerData.symbol,
+                    quantity: offerData.quantity,
+                    timestamp: offerData.timestamp,
+                    operation: offerData.operation
+                })
+            }, "oferta externa");
+        } else {
+            console.log(`⚠️ Ignorando nuestra propia oferta: ${offerData.auction_id}`);
+        }
+    } catch (err) {
+        console.error("Error procesando oferta recibida:", err);
+    }
+}
+
+// NUEVO: Manejar propuestas recibidas (operation: "proposal")
+async function handleProposalReceived(proposalData) {
+    try {
+        // Verificar si la propuesta es de otro grupo
+        if (String(proposalData.group_id) !== String(GROUP_ID)) {
+            console.log(`📩 Propuesta recibida del grupo ${proposalData.group_id} para auction_id: ${proposalData.auction_id}`);
+            console.log(`Detalles: ${proposalData.quantity} ${proposalData.symbol} - proposal_id: ${proposalData.proposal_id}`);
+            
+            // Guardar propuesta externa en la API
+            const endpointUrl = "http://api:3000/admin/external-offers";
+            await fetchWithRetry(endpointUrl, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    auction_id: proposalData.auction_id,
+                    proposal_id: proposalData.proposal_id,
+                    group_id: proposalData.group_id,
+                    symbol: proposalData.symbol,
+                    quantity: proposalData.quantity,
+                    timestamp: proposalData.timestamp,
+                    operation: proposalData.operation
+                })
+            }, "propuesta externa");
+        } else {
+            console.log(`⚠️ Ignorando nuestra propia propuesta: ${proposalData.proposal_id}`);
+        }
+    } catch (err) {
+        console.error("Error procesando propuesta recibida:", err);
+    }
+}
+
+// NUEVO: Manejar respuestas recibidas (operation: "acceptance" o "rejection")
+async function handleResponseReceived(responseData) {
+    try {
+        // Verificar si la respuesta es de otro grupo
+        if (String(responseData.group_id) !== String(GROUP_ID)) {
+            console.log(`📋 Respuesta recibida del grupo ${responseData.group_id}: ${responseData.operation} para proposal_id: ${responseData.proposal_id}`);
+            
+            // Guardar respuesta externa en la API
+            const endpointUrl = "http://api:3000/admin/external-offers";
+            await fetchWithRetry(endpointUrl, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    auction_id: responseData.auction_id,
+                    proposal_id: responseData.proposal_id,
+                    group_id: responseData.group_id,
+                    symbol: responseData.symbol,
+                    quantity: responseData.quantity,
+                    timestamp: responseData.timestamp,
+                    operation: responseData.operation
+                })
+            }, "respuesta externa");
+
+            // ✨ NUEVO: Si es una aceptación, verificar si aceptaron MI propuesta
+            if (responseData.operation === 'acceptance') {
+                console.log(`🎉 ¡Propuesta aceptada! Verificando si es mía...`);
+                
+                // Verificar si tengo una propuesta con este proposal_id en mi historial
+                const checkProposalUrl = "http://api:3000/admin/check-my-proposal";
+                try {
+                    const checkResponse = await fetch(checkProposalUrl, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            auction_id: responseData.auction_id,
+                            proposal_id: responseData.proposal_id
+                        })
+                    });
+                    
+                    if (checkResponse.ok) {
+                        const checkData = await checkResponse.json();
+                        if (checkData.is_my_proposal) {
+                            console.log(`🔄 ¡Mi propuesta fue aceptada! Procesando intercambio...`);
+                            
+                            // CORRECCIÓN: Usar datos de la oferta original para lo que voy a recibir
+                            if (checkData.original_offer) {
+                                console.log(`📤 Doy: ${checkData.my_proposal.quantity} ${checkData.my_proposal.symbol}`);
+                                console.log(`📥 Recibo: ${checkData.original_offer.quantity} ${checkData.original_offer.symbol}`);
+                                
+                                // Ejecutar el intercambio en mi backend con los datos correctos
+                                const exchangeUrl = "http://api:3000/admin/execute-exchange";
+                                await fetchWithRetry(exchangeUrl, {
+                                    method: "POST",
+                                    headers: { "Content-Type": "application/json" },
+                                    body: JSON.stringify({
+                                        auction_id: responseData.auction_id,
+                                        proposal_id: responseData.proposal_id,
+                                        give_symbol: checkData.my_proposal.symbol,        // Lo que doy (mi propuesta)
+                                        give_quantity: checkData.my_proposal.quantity,
+                                        receive_symbol: checkData.original_offer.symbol,  // Lo que recibo (oferta original)
+                                        receive_quantity: checkData.original_offer.quantity,
+                                        counterpart_group: responseData.group_id
+                                    })
+                                }, "ejecución de intercambio");
+                            } else {
+                                console.error(`❌ No se encontró la oferta original. No se puede completar el intercambio.`);
+                                console.log(`📤 Datos disponibles - Mi propuesta: ${checkData.my_proposal.quantity} ${checkData.my_proposal.symbol}`);
+                                console.log(`❌ Datos faltantes - Oferta original no encontrada`);
+                            }
+                        }
+                    }
+                } catch (checkError) {
+                    console.error("Error verificando si es mi propuesta:", checkError);
+                }
+            }
+            
+            // 🔓 NUEVO: Si es un rechazo, verificar si rechazaron MI propuesta para devolver acciones
+            else if (responseData.operation === 'rejection') {
+                console.log(`💔 ¡Propuesta rechazada! Verificando si es mía...`);
+                
+                // Verificar si tengo una propuesta con este proposal_id en mi historial
+                const checkProposalUrl = "http://api:3000/admin/check-my-proposal";
+                try {
+                    const checkResponse = await fetch(checkProposalUrl, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            auction_id: responseData.auction_id,
+                            proposal_id: responseData.proposal_id
+                        })
+                    });
+                    
+                    if (checkResponse.ok) {
+                        const checkData = await checkResponse.json();
+                        if (checkData.is_my_proposal) {
+                            console.log(`🔓 ¡Mi propuesta fue rechazada! Devolviendo acciones reservadas...`);
+                            console.log(`🔓 Acciones a devolver: ${checkData.my_proposal.quantity} ${checkData.my_proposal.symbol}`);
+                            
+                            // Manejar el rechazo devolviendo las acciones reservadas
+                            const rejectionUrl = "http://api:3000/admin/handle-proposal-rejected";
+                            await fetchWithRetry(rejectionUrl, {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({
+                                    auction_id: responseData.auction_id,
+                                    proposal_id: responseData.proposal_id
+                                })
+                            }, "manejo de rechazo de propuesta");
+                        }
+                    }
+                } catch (checkError) {
+                    console.error("Error verificando si es mi propuesta rechazada:", checkError);
+                }
+            }
+            
+        } else {
+            console.log(`⚠️ Ignorando nuestra propia respuesta: ${responseData.proposal_id}`);
+        }
+    } catch (err) {
+        console.error("Error procesando respuesta recibida:", err);
+    }
+}
+
+// Mantener para compatibilidad
 async function handleAuctionCreated(auctionData) {
     try {
         // Verificar si la subasta es de otro grupo

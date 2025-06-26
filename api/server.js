@@ -11,14 +11,63 @@ import axios from 'axios';
 import sequelize from './db/db.js';
 import { TransbankService } from './src/services/webpayService.js';
 import webpayRoutes from './src/routes/webpayRoutes.js';
+import adminRoutes from './src/routes/adminRoutes.js';
 import { corsOptions, customCorsMiddleware, webpayCorsmiddleware } from './cors-configuration.js';
 import * as auctionController from './src/controllers/auctionController.js';
 import * as exchangeController from './src/controllers/exchangeController.js';
+import * as adminController from './src/controllers/adminController.js';
 import { initializeDatabase } from './src/utils/initDatabase.js';
 
 const Pool = pg.Pool;
 const app = express();
 const port = 3000;
+
+// 🔧 CONFIGURACIÓN DE BYPASS DE AUTENTICACIÓN PARA PRUEBAS
+const BYPASS_AUTH = process.env.BYPASS_AUTH === 'true' || process.env.NODE_ENV === 'development';
+
+// Middleware de bypass que simula un usuario autenticado
+const bypassAuthMiddleware = (req, res, next) => {
+    if (BYPASS_AUTH) {
+        console.log('🔧 BYPASS AUTH: Simulando usuario autenticado para pruebas');
+        // Simular usuario autenticado con ID fijo para pruebas
+        req.userId = 1;
+        req.auth = {
+            payload: {
+                sub: 'test-user-id',
+                email: 'test@ejemplo.com',
+                name: 'Usuario de Prueba'
+            }
+        };
+        next();
+    } else {
+        // Si no está en modo bypass, usar autenticación normal
+        return res.status(401).json({ 
+            error: "Autenticación requerida",
+            message: "Para usar el modo de pruebas, configura BYPASS_AUTH=true"
+        });
+    }
+};
+
+// Función helper para decidir qué middleware usar
+const conditionalAuth = (req, res, next) => {
+    if (BYPASS_AUTH) {
+        console.log('🔧 Usando bypass de autenticación');
+        return bypassAuthMiddleware(req, res, next);
+    } else {
+        console.log('🔐 Usando autenticación JWT normal');
+        return checkJwt(req, res, next);
+    }
+};
+
+const conditionalSyncUser = (req, res, next) => {
+    if (BYPASS_AUTH) {
+        console.log('🔧 Simulando sincronización de usuario');
+        // En modo bypass, ya tenemos req.userId = 1
+        return next();
+    } else {
+        return syncUser(req, res, next);
+    }
+};
 
 // ✅ APLICAR CORS DESPUÉS DE CREAR LA INSTANCIA DE EXPRESS
 app.use(cors(corsOptions));
@@ -36,6 +85,7 @@ app.use('/api/purchases', (req, res, next) => {
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use('/api/purchases', purchaseRoutes);
+app.use('/admin', conditionalAuth, conditionalSyncUser, adminRoutes);
 
 
 dotenv.config();
@@ -542,7 +592,7 @@ app.get('/stocks/:symbol', async (req, res) => {
 });
 
 // Endpoints de perfil y registro existentes
-app.get('/user/profile', checkJwt, syncUser, async (req, res) => {
+app.get('/user/profile', conditionalAuth, conditionalSyncUser, async (req, res) => {
     try {
         // El usuario ya está sincronizado por el middleware
         const userQuery = `
@@ -567,7 +617,7 @@ app.get('/user/profile', checkJwt, syncUser, async (req, res) => {
 });
 
 // Endpoint de registro (se mantiene para compatibilidad, pero no es necesario usarlo)
-app.post('/users/register', checkJwt, syncUser, async (req, res) => {
+app.post('/users/register', conditionalAuth, conditionalSyncUser, async (req, res) => {
     try {
         // El usuario ya ha sido sincronizado en este punto
         res.status(200).json({ 
@@ -583,8 +633,8 @@ app.post('/users/register', checkJwt, syncUser, async (req, res) => {
 
 // NUEVOS ENDPOINTS PARA WALLET ==============================================
 
-// Endpoint de depósito en wallet corregido
-app.post('/wallet/deposit', checkJwt, syncUser, async (req, res) => {
+// Endpoint de depósito en wallet
+app.post('/wallet/deposit', conditionalAuth, conditionalSyncUser, async (req, res) => {
     try {
         const { amount } = req.body;
         
@@ -627,8 +677,8 @@ app.post('/wallet/deposit', checkJwt, syncUser, async (req, res) => {
     }
 });
 
-// Obtener saldo de la billetera (versión mejorada)
-app.get('/wallet/balance', checkJwt, syncUser, async (req, res) => {
+// Obtener saldo de la billetera
+app.get('/wallet/balance', conditionalAuth, conditionalSyncUser, async (req, res) => {
     try {
         // Obtener saldo de la billetera
         const walletQuery = `
@@ -649,8 +699,8 @@ app.get('/wallet/balance', checkJwt, syncUser, async (req, res) => {
 
 // ENDPOINTS DE COMPRA DE ACCIONES ===========================================
 
-// Comprar acciones (versión simplificada - CON AUTENTICACIÓN RESTAURADA)
-app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
+// Comprar acciones
+app.post('/stocks/buy', conditionalAuth, conditionalSyncUser, async (req, res) => {
     try {
         const { symbol, quantity } = req.body;
         
@@ -719,7 +769,7 @@ app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
                 [quantity, stock.id]
             );
 
-            // 3. Crear registro de compra
+            // 3. Crear registro de compra en purchase_requests
             const purchaseQuery = `
                 INSERT INTO purchase_requests 
                 (request_id, user_id, symbol, quantity, price, status) 
@@ -734,6 +784,12 @@ app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
                 quantity, 
                 stock.price
             ]);
+
+            // ✨ NUEVO: También insertar en la tabla purchases para que aparezca en "Mis Acciones"
+            await client.query(`
+                INSERT INTO purchases (user_id, symbol, quantity, price_at_purchase, status)
+                VALUES ($1, $2, $3, $4, 'COMPLETED')
+            `, [req.userId, symbol, quantity, stock.price]);
 
             // 4. Registrar evento
             await logEvent('PURCHASE_DIRECT', {
@@ -776,7 +832,7 @@ app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
 
 
 // Obtener compras del usuario (versión mejorada) - CON AUTENTICACIÓN RESTAURADA
-app.get('/purchases', checkJwt, syncUser, async (req, res) => {
+app.get('/purchases', conditionalAuth, conditionalSyncUser, async (req, res) => {
     try {
         // Obtener compras del usuario con una consulta mejorada que evita duplicados
         const purchasesQuery = `
@@ -1123,7 +1179,7 @@ app.get('/check-request', async (req, res) => {
 // Agregar este endpoint de depuración después de los demás endpoints
 
 // Endpoint de depuración de token JWT
-app.get('/debug/token', checkJwt, async (req, res) => {
+app.get('/debug/token', conditionalAuth, async (req, res) => {
     try {
         // 1. Extraer el token del encabezado
         const authHeader = req.headers.authorization || '';
@@ -1298,7 +1354,7 @@ app.get('/workers/health', async (req, res) => {
 });
 
 // Endpoint para obtener estimación de una compra específica
-app.get('/purchase/:requestId/estimation', checkJwt, syncUser, async (req, res) => {
+app.get('/purchase/:requestId/estimation', conditionalAuth, conditionalSyncUser, async (req, res) => {
     try {
         const { requestId } = req.params;
         
@@ -1346,34 +1402,77 @@ app.get('/purchase/:requestId/estimation', checkJwt, syncUser, async (req, res) 
         res.status(500).json({ error: 'Error obteniendo estimación de compra' });
     }
 });
-// NUEVAS RUTAS PARA SUBASTAS (RF04)
-// Crear una subasta
-app.post('/auctions', checkJwt, syncUser, auctionController.createAuction);
+// NUEVAS RUTAS PARA SUBASTAS (RF04) - TEMPORALMENTE SIN AUTENTICACIÓN
+// Crear una subasta (SIN AUTH TEMPORAL)
+app.post('/auctions', auctionController.createAuction);
 
-// Obtener subastas activas
+// Obtener subastas activas (PÚBLICO - no requiere auth)
 app.get('/auctions', auctionController.getActiveAuctions);
 
-// Hacer una oferta en una subasta
-app.post('/auctions/:auction_id/bid', checkJwt, syncUser, auctionController.placeBid);
+// Hacer una oferta en una subasta (SIN AUTH TEMPORAL)
+app.post('/auctions/:auction_id/bid', auctionController.placeBid);
 
-// Cerrar una subasta
-app.post('/auctions/:auction_id/close', checkJwt, syncUser, auctionController.closeAuction);
+// Cerrar una subasta (SIN AUTH TEMPORAL)
+app.post('/auctions/:auction_id/close', auctionController.closeAuction);
 
 // Procesar subastas externas (desde MQTT)
 app.post('/auctions/external', auctionController.processExternalAuction);
 
-// NUEVAS RUTAS PARA INTERCAMBIOS (RF05)
-// Proponer un intercambio
-app.post('/exchanges', checkJwt, syncUser, exchangeController.proposeExchange);
+// Procesar ofertas externas del formato del enunciado (desde MQTT)
+app.post('/external-offers', async (req, res) => {
+    try {
+        const offerData = req.body;
+        const pool = req.app.locals.pool;
+        
+        console.log("Procesando oferta externa:", offerData);
+        
+        // Insertar o actualizar la oferta externa en la base de datos
+        const insertQuery = `
+            INSERT INTO external_auctions (auction_id, group_id, symbol, quantity, timestamp, status)
+            VALUES ($1, $2, $3, $4, $5, 'ACTIVE')
+            ON CONFLICT (auction_id) 
+            DO UPDATE SET 
+                group_id = EXCLUDED.group_id,
+                symbol = EXCLUDED.symbol,
+                quantity = EXCLUDED.quantity,
+                timestamp = EXCLUDED.timestamp,
+                updated_at = CURRENT_TIMESTAMP
+            RETURNING *
+        `;
+        
+        const result = await pool.query(insertQuery, [
+            offerData.auction_id,
+            offerData.group_id,
+            offerData.symbol,
+            offerData.quantity,
+            offerData.timestamp
+        ]);
+        
+        console.log(`Oferta externa guardada: ${offerData.symbol} del grupo ${offerData.group_id}`);
+        
+        res.json({ 
+            status: "success", 
+            message: "Oferta externa procesada",
+            offer: result.rows[0]
+        });
+    } catch (error) {
+        console.error("Error procesando oferta externa:", error);
+        res.status(500).json({ error: "Error interno del servidor" });
+    }
+});
 
-// Responder a un intercambio (aceptar/rechazar)
-app.post('/exchanges/:exchange_id/respond', checkJwt, syncUser, exchangeController.respondToExchange);
+// NUEVAS RUTAS PARA INTERCAMBIOS (RF05) - TEMPORALMENTE SIN AUTENTICACIÓN
+// Proponer un intercambio (SIN AUTH TEMPORAL)
+app.post('/exchanges', exchangeController.proposeExchange);
 
-// Obtener intercambios pendientes
-app.get('/exchanges/pending', checkJwt, syncUser, exchangeController.getPendingExchanges);
+// Responder a un intercambio (aceptar/rechazar) (SIN AUTH TEMPORAL)
+app.post('/exchanges/:exchange_id/respond', exchangeController.respondToExchange);
 
-// Obtener historial de intercambios
-app.get('/exchanges/history', checkJwt, syncUser, exchangeController.getExchangeHistory);
+// Obtener intercambios pendientes (SIN AUTH TEMPORAL)
+app.get('/exchanges/pending', exchangeController.getPendingExchanges);
+
+// Obtener historial de intercambios (SIN AUTH TEMPORAL)
+app.get('/exchanges/history', exchangeController.getExchangeHistory);
 
 // Procesar propuestas externas (desde MQTT)
 app.post('/exchanges/proposal', exchangeController.processExternalProposal);
@@ -1387,6 +1486,411 @@ app.get('/health', (req, res) => {
         status: 'ok', 
         timestamp: new Date().toISOString(),
         service: 'StockMarketU API'
+    });
+});
+
+// ===============================================
+// RUTAS DE ADMINISTRADOR (REQUIEREN AUTENTICACIÓN DE ADMIN)
+// ===============================================
+
+// Promover usuario a administrador (solo configuración inicial)
+// ===============================================
+// RUTAS DE ADMIN MOVIDAS A adminRoutes.js
+// ===============================================
+
+// ===============================================
+// ENDPOINTS DE PRUEBA SIN AUTENTICACIÓN
+// ===============================================
+
+// Crear subasta de prueba
+app.post('/test/auctions', async (req, res) => {
+    try {
+        const { symbol, quantity, starting_price, duration_minutes } = req.body;
+        
+        if (!symbol || !quantity || !starting_price || !duration_minutes) {
+            return res.status(400).json({ 
+                error: "Faltan parámetros requeridos",
+                required: ["symbol", "quantity", "starting_price", "duration_minutes"]
+            });
+        }
+        
+        const pool = req.app.locals.pool;
+        const client = await pool.connect();
+        
+        try {
+            await client.query('BEGIN');
+            
+            // Verificar stocks disponibles
+            const stockQuery = `SELECT SUM(quantity) as total_quantity FROM stocks WHERE symbol = $1 AND quantity > 0`;
+            const stockResult = await client.query(stockQuery, [symbol]);
+            
+            if (!stockResult.rows[0] || stockResult.rows[0].total_quantity < quantity) {
+                await client.query('ROLLBACK');
+                return res.status(400).json({ error: "No hay suficientes acciones disponibles" });
+            }
+            
+            // Crear subasta
+            const auctionId = uuidv4();
+            const endTime = new Date(Date.now() + duration_minutes * 60 * 1000);
+            const GROUP_ID = process.env.GROUP_ID || "1";
+            
+            const insertQuery = `
+                INSERT INTO auctions (id, group_id, symbol, quantity, starting_price, current_price, end_time, status)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, 'ACTIVE')
+                RETURNING *
+            `;
+            
+            const auctionResult = await client.query(insertQuery, [
+                auctionId, GROUP_ID, symbol, quantity, starting_price, starting_price, endTime
+            ]);
+            
+            // Reservar acciones
+            await client.query(`
+                UPDATE stocks SET quantity = quantity - $1 
+                WHERE symbol = $2 AND id = (SELECT id FROM stocks WHERE symbol = $2 AND quantity > 0 ORDER BY timestamp DESC LIMIT 1)
+            `, [quantity, symbol]);
+            
+            await client.query('COMMIT');
+            
+            res.status(201).json({
+                status: "success",
+                message: "Subasta de prueba creada",
+                auction: auctionResult.rows[0]
+            });
+            
+        } finally {
+            client.release();
+        }
+        
+    } catch (error) {
+        console.error("Error en subasta de prueba:", error);
+        res.status(500).json({ error: "Error interno del servidor" });
+    }
+});
+
+// Hacer oferta de prueba
+app.post('/test/auctions/:auction_id/bid', async (req, res) => {
+    try {
+        const { auction_id } = req.params;
+        const { bid_amount } = req.body;
+        const GROUP_ID = process.env.GROUP_ID || "1";
+        
+        if (!bid_amount || bid_amount <= 0) {
+            return res.status(400).json({ error: "El monto de la oferta debe ser positivo" });
+        }
+        
+        const pool = req.app.locals.pool;
+        const client = await pool.connect();
+        
+        try {
+            await client.query('BEGIN');
+            
+            // Verificar subasta
+            const auctionQuery = `SELECT * FROM auctions WHERE id = $1 AND status = 'ACTIVE' AND end_time > NOW()`;
+            const auctionResult = await client.query(auctionQuery, [auction_id]);
+            
+            if (auctionResult.rows.length === 0) {
+                await client.query('ROLLBACK');
+                return res.status(404).json({ error: "Subasta no encontrada o ya cerrada" });
+            }
+            
+            const auction = auctionResult.rows[0];
+            
+            if (bid_amount <= auction.current_price) {
+                await client.query('ROLLBACK');
+                return res.status(400).json({ 
+                    error: "La oferta debe ser mayor al precio actual",
+                    current_price: auction.current_price
+                });
+            }
+            
+            // Insertar oferta
+            const bidId = uuidv4();
+            await client.query(`
+                INSERT INTO auction_bids (id, auction_id, bidder_group_id, bid_amount)
+                VALUES ($1, $2, $3, $4)
+            `, [bidId, auction_id, GROUP_ID, bid_amount]);
+            
+            // Actualizar precio actual
+            await client.query(`
+                UPDATE auctions SET current_price = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2
+            `, [bid_amount, auction_id]);
+            
+            await client.query('COMMIT');
+            
+            res.json({
+                status: "success",
+                message: "Oferta de prueba realizada",
+                bid: { id: bidId, auction_id: auction_id, bid_amount: bid_amount }
+            });
+            
+        } finally {
+            client.release();
+        }
+        
+    } catch (error) {
+        console.error("Error en oferta de prueba:", error);
+        res.status(500).json({ error: "Error interno del servidor" });
+    }
+});
+
+// Proponer intercambio de prueba
+app.post('/test/exchanges', async (req, res) => {
+    try {
+        const { target_group_id, offered_symbol, offered_quantity, requested_symbol, requested_quantity } = req.body;
+        const GROUP_ID = process.env.GROUP_ID || "1";
+        
+        if (!target_group_id || !offered_symbol || !offered_quantity || !requested_symbol || !requested_quantity) {
+            return res.status(400).json({ 
+                error: "Faltan parámetros requeridos",
+                required: ["target_group_id", "offered_symbol", "offered_quantity", "requested_symbol", "requested_quantity"]
+            });
+        }
+        
+        const pool = req.app.locals.pool;
+        const client = await pool.connect();
+        
+        try {
+            await client.query('BEGIN');
+            
+            // Verificar stocks disponibles
+            const stockQuery = `SELECT SUM(quantity) as total_quantity FROM stocks WHERE symbol = $1 AND quantity > 0`;
+            const stockResult = await client.query(stockQuery, [offered_symbol]);
+            
+            if (!stockResult.rows[0] || stockResult.rows[0].total_quantity < offered_quantity) {
+                await client.query('ROLLBACK');
+                return res.status(400).json({ error: "No hay suficientes acciones para ofrecer" });
+            }
+            
+            // Crear intercambio
+            const exchangeId = uuidv4();
+            const insertQuery = `
+                INSERT INTO exchanges (id, origin_group_id, target_group_id, offered_symbol, offered_quantity, requested_symbol, requested_quantity, status)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, 'PENDING')
+                RETURNING *
+            `;
+            
+            const exchangeResult = await client.query(insertQuery, [
+                exchangeId, parseInt(GROUP_ID), target_group_id, offered_symbol, offered_quantity, requested_symbol, requested_quantity
+            ]);
+            
+            // Reservar acciones ofrecidas
+            await client.query(`
+                UPDATE stocks SET quantity = quantity - $1 
+                WHERE symbol = $2 AND id = (SELECT id FROM stocks WHERE symbol = $2 AND quantity > 0 ORDER BY timestamp DESC LIMIT 1)
+            `, [offered_quantity, offered_symbol]);
+            
+            await client.query('COMMIT');
+            
+            res.status(201).json({
+                status: "success",
+                message: "Intercambio de prueba propuesto",
+                exchange: exchangeResult.rows[0]
+            });
+            
+        } finally {
+            client.release();
+        }
+        
+    } catch (error) {
+        console.error("Error en intercambio de prueba:", error);
+        res.status(500).json({ error: "Error interno del servidor" });
+    }
+});
+
+// ===============================================
+// ENDPOINTS DE PRUEBA PARA COMPRAS Y BILLETERA
+// ===============================================
+
+// Ver saldo de prueba
+app.get('/test/wallet/balance', async (req, res) => {
+    try {
+        const pool = req.app.locals.pool;
+        const TEST_USER_ID = 1;
+        
+        const walletQuery = `SELECT balance FROM wallet WHERE user_id = $1`;
+        const walletResult = await pool.query(walletQuery, [TEST_USER_ID]);
+        
+        const balance = walletResult.rows[0]?.balance || 0;
+        
+        res.json({ 
+            balance: balance,
+            user_id: TEST_USER_ID,
+            message: "Saldo de usuario de prueba"
+        });
+    } catch (error) {
+        console.error("Error obteniendo saldo de prueba:", error);
+        res.status(500).json({ error: "Error interno del servidor" });
+    }
+});
+
+// Depositar dinero de prueba
+app.post('/test/wallet/deposit', async (req, res) => {
+    try {
+        const { amount } = req.body;
+        const pool = req.app.locals.pool;
+        const TEST_USER_ID = 1;
+        
+        if (!amount || amount <= 0) {
+            return res.status(400).json({ error: "Monto inválido" });
+        }
+        
+        const updateQuery = `
+            UPDATE wallet 
+            SET balance = balance + $2, updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = $1
+            RETURNING balance
+        `;
+        
+        const result = await pool.query(updateQuery, [TEST_USER_ID, amount]);
+        
+        res.json({
+            status: "success",
+            message: `Depósito de $${amount} realizado`,
+            new_balance: result.rows[0].balance,
+            user_id: TEST_USER_ID
+        });
+    } catch (error) {
+        console.error("Error en depósito de prueba:", error);
+        res.status(500).json({ error: "Error interno del servidor" });
+    }
+});
+
+// Comprar acciones de prueba
+app.post('/test/stocks/buy', async (req, res) => {
+    try {
+        const { symbol, quantity } = req.body;
+        const pool = req.app.locals.pool;
+        const client = await pool.connect();
+        const TEST_USER_ID = 1;
+        
+        if (!symbol || !quantity || quantity <= 0) {
+            return res.status(400).json({ error: "Solicitud de compra inválida" });
+        }
+        
+        try {
+            await client.query('BEGIN');
+            
+            // Obtener precio actual de la acción
+            const stockQuery = `
+                SELECT * FROM stocks 
+                WHERE symbol = $1 
+                ORDER BY timestamp DESC 
+                LIMIT 1
+            `;
+            
+            const stockResult = await client.query(stockQuery, [symbol]);
+            
+            if (stockResult.rows.length === 0) {
+                await client.query('ROLLBACK');
+                return res.status(404).json({ error: "Acción no encontrada" });
+            }
+            
+            const stock = stockResult.rows[0];
+            
+            if (stock.quantity < quantity) {
+                await client.query('ROLLBACK');
+                return res.status(400).json({ error: "No hay suficientes acciones disponibles" });
+            }
+            
+            const totalCost = stock.price * quantity;
+            
+            // Verificar saldo del usuario
+            const balanceQuery = `SELECT balance FROM wallet WHERE user_id = $1`;
+            const balanceResult = await client.query(balanceQuery, [TEST_USER_ID]);
+            
+            if (balanceResult.rows.length === 0 || balanceResult.rows[0].balance < totalCost) {
+                await client.query('ROLLBACK');
+                return res.status(400).json({ 
+                    error: `Saldo insuficiente. Necesitas $${totalCost} pero tienes $${balanceResult.rows[0]?.balance || 0}` 
+                });
+            }
+            
+            // Actualizar saldo
+            await client.query(`
+                UPDATE wallet 
+                SET balance = balance - $2 
+                WHERE user_id = $1
+            `, [TEST_USER_ID, totalCost]);
+            
+            // Actualizar inventario
+            await client.query(`
+                UPDATE stocks 
+                SET quantity = quantity - $1 
+                WHERE id = $2
+            `, [quantity, stock.id]);
+            
+            // Registrar compra
+            const purchaseId = uuidv4();
+            await client.query(`
+                INSERT INTO purchase_requests (request_id, user_id, symbol, quantity, price, status, created_at)
+                VALUES ($1, $2, $3, $4, $5, 'ACCEPTED', CURRENT_TIMESTAMP)
+            `, [purchaseId, TEST_USER_ID, symbol, quantity, stock.price]);
+            
+            await client.query('COMMIT');
+            
+            res.json({
+                status: "success",
+                message: `Compra exitosa: ${quantity} acciones de ${symbol}`,
+                purchase: {
+                    id: purchaseId,
+                    symbol: symbol,
+                    quantity: quantity,
+                    price: stock.price,
+                    total_cost: totalCost
+                }
+            });
+            
+        } finally {
+            client.release();
+        }
+        
+    } catch (error) {
+        console.error("Error en compra de prueba:", error);
+        res.status(500).json({ error: "Error interno del servidor" });
+    }
+});
+
+// Ver mis compras de prueba
+app.get('/test/purchases', async (req, res) => {
+    try {
+        const pool = req.app.locals.pool;
+        const TEST_USER_ID = 1;
+        
+        const purchasesQuery = `
+            SELECT pr.*, s.long_name
+            FROM purchase_requests pr
+            LEFT JOIN stocks s ON pr.symbol = s.symbol
+            WHERE pr.user_id = $1 AND pr.status = 'ACCEPTED'
+            ORDER BY pr.created_at DESC
+        `;
+        
+        const result = await pool.query(purchasesQuery, [TEST_USER_ID]);
+        
+        res.json({
+            status: "success",
+            purchases: result.rows,
+            user_id: TEST_USER_ID
+        });
+    } catch (error) {
+        console.error("Error obteniendo compras de prueba:", error);
+        res.status(500).json({ error: "Error interno del servidor" });
+    }
+});
+
+// Endpoint para verificar configuración de Auth0
+app.get('/auth0/config', (req, res) => {
+    res.json({
+        domain: process.env.AUTH0_DOMAIN,
+        audience: process.env.AUTH0_AUDIENCE,
+        client_id_configured: !!process.env.AUTH0_CLIENT_ID,
+        client_secret_configured: !!process.env.AUTH0_CLIENT_SECRET,
+        frontend_should_use: {
+            domain: process.env.AUTH0_DOMAIN,
+            clientId: process.env.AUTH0_CLIENT_ID,
+            audience: process.env.AUTH0_AUDIENCE,
+            scope: "openid profile email offline_access"
+        }
     });
 });
 

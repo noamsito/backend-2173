@@ -170,6 +170,48 @@ CREATE TABLE IF NOT EXISTS exchanges (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Tabla para propuestas de intercambio siguiendo el formato exacto del enunciado
+CREATE TABLE IF NOT EXISTS auction_proposals (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    auction_id UUID NOT NULL,
+    proposer_group_id INTEGER NOT NULL,
+    offered_symbol VARCHAR(10) NOT NULL,
+    offered_quantity INTEGER NOT NULL CHECK (offered_quantity > 0),
+    offered_timestamp TIMESTAMP NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'ACCEPTED', 'REJECTED')),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (auction_id) REFERENCES auctions(id)
+);
+
+-- Tabla para solicitudes de compra grupal de administrador
+CREATE TABLE IF NOT EXISTS group_purchase_requests (
+    request_id UUID PRIMARY KEY,
+    admin_user_id INTEGER NOT NULL,
+    group_id INTEGER NOT NULL,
+    symbol VARCHAR(10) NOT NULL,
+    quantity INTEGER NOT NULL CHECK (quantity > 0),
+    price DECIMAL(12,2) NOT NULL,
+    total_cost DECIMAL(12,2) NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'ACCEPTED', 'REJECTED')),
+    reason TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (admin_user_id) REFERENCES users(id)
+);
+
+-- Tabla para rastrear ofertas/subastas externas de otros grupos
+CREATE TABLE IF NOT EXISTS external_auctions (
+    auction_id UUID PRIMARY KEY,
+    group_id INTEGER NOT NULL,
+    symbol VARCHAR(10) NOT NULL,
+    quantity INTEGER NOT NULL,
+    timestamp TIMESTAMP NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'CLOSED', 'CANCELLED')),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Índices para mejorar performance
 CREATE INDEX idx_auctions_group_id ON auctions(group_id);
 CREATE INDEX idx_auctions_status ON auctions(status);
@@ -178,3 +220,12 @@ CREATE INDEX idx_auction_bids_auction_id ON auction_bids(auction_id);
 CREATE INDEX idx_exchanges_origin_group ON exchanges(origin_group_id);
 CREATE INDEX idx_exchanges_target_group ON exchanges(target_group_id);
 CREATE INDEX idx_exchanges_status ON exchanges(status);
+CREATE INDEX idx_auction_proposals_auction_id ON auction_proposals(auction_id);
+CREATE INDEX idx_auction_proposals_proposer_group ON auction_proposals(proposer_group_id);
+CREATE INDEX idx_auction_proposals_status ON auction_proposals(status);
+CREATE INDEX idx_group_purchase_requests_group_id ON group_purchase_requests(group_id);
+CREATE INDEX idx_group_purchase_requests_admin_user ON group_purchase_requests(admin_user_id);
+CREATE INDEX idx_group_purchase_requests_status ON group_purchase_requests(status);
+CREATE INDEX idx_external_auctions_group_id ON external_auctions(group_id);
+CREATE INDEX idx_external_auctions_status ON external_auctions(status);
+CREATE INDEX idx_external_auctions_symbol ON external_auctions(symbol);
