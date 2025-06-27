@@ -182,9 +182,9 @@ export async function initializeDatabase() {
       console.log(`   - Compras grupales: ${groupRequestsCount.rows[0].count} registros`);
       console.log(`   - Subastas externas: ${externalAuctionsCount.rows[0].count} registros`);
     } catch (err) {
-      console.log(`📊 Estado actual:`);
-      console.log(`   - Subastas: ${auctionsCount.rows[0].count} registros`);
-      console.log(`   - Intercambios: ${exchangesCount.rows[0].count} registros`);
+    console.log(`📊 Estado actual:`);
+    console.log(`   - Subastas: ${auctionsCount.rows[0].count} registros`);
+    console.log(`   - Intercambios: ${exchangesCount.rows[0].count} registros`);
       console.log(`   - Nuevas tablas: creándose...`);
     }
 
