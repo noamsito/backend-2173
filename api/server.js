@@ -592,29 +592,57 @@ app.get('/stocks/:symbol', async (req, res) => {
 });
 
 // Endpoints de perfil y registro existentes
-app.get('/user/profile', conditionalAuth, conditionalSyncUser, async (req, res) => {
+// ...existing code...
+
+// Endpoint para obtener información del usuario actual
+app.get('/user/profile', checkJwt, syncUser, async (req, res) => {
     try {
-        // El usuario ya está sincronizado por el middleware
-        const userQuery = `
-            SELECT u.*, w.balance 
-            FROM users u 
-            LEFT JOIN wallet w ON u.id = w.user_id 
-            WHERE u.id = $1
-        `;
-        const userResult = await client.query(userQuery, [req.userId]);
+        const client = await pool.connect();
         
-        if (userResult.rows.length === 0) {
-            return res.status(404).json({ error: "Usuario no encontrado" });
+        try {
+            const userQuery = `
+                SELECT id, email, name, is_admin, last_login 
+                FROM users 
+                WHERE id = $1
+            `;
+            
+            const result = await client.query(userQuery, [req.userId]);
+            
+            if (result.rows.length === 0) {
+                return res.status(404).json({ error: "Usuario no encontrado" });
+            }
+            
+            const user = result.rows[0];
+            
+            // Verificar admin desde token también
+            const rolesFromToken = req.auth?.payload?.['https://stockmarket-app/roles'] || [];
+            const isAdminFromToken = rolesFromToken.includes('admin') || rolesFromToken.includes('administrator');
+            
+            // Usar el valor más permisivo (si cualquiera de los dos dice que es admin)
+            const isAdmin = user.is_admin || isAdminFromToken || req.isAdmin;
+            
+            console.log('DEBUG Profile - DB admin:', user.is_admin);
+            console.log('DEBUG Profile - Token admin:', isAdminFromToken);
+            console.log('DEBUG Profile - Req admin:', req.isAdmin);
+            console.log('DEBUG Profile - Final admin:', isAdmin);
+            
+            res.json({
+                id: user.id,
+                email: user.email,
+                name: user.name,
+                isAdmin: isAdmin,
+                lastLogin: user.last_login
+            });
+            
+        } finally {
+            client.release();
         }
-        
-        const user = userResult.rows[0];
-        
-        res.json({ status: "success", data: user });
     } catch (error) {
-        console.error("Error obteniendo perfil de usuario:", error);
-        res.status(500).json({ error: "Error interno del servidor" });
+        console.error('Error obteniendo perfil:', error);
+        res.status(500).json({ error: 'Error obteniendo información del usuario' });
     }
 });
+
 
 // Endpoint de registro (se mantiene para compatibilidad, pero no es necesario usarlo)
 app.post('/users/register', conditionalAuth, conditionalSyncUser, async (req, res) => {
@@ -1854,132 +1882,37 @@ app.post('/test/stocks/buy', async (req, res) => {
 // Ver mis compras de prueba
 app.get('/test/purchases', async (req, res) => {
     try {
-        const pool = req.app.locals.pool;
-        const TEST_USER_ID = 1;
+        const message = {
+            request_id: requestId,
+            symbol: symbol,
+            quantity: quantity,
+            price: price,
+            stock_origin: GROUP_ID, // Tu número de grupo
+            timestamp: new Date().toISOString()
+        };
         
-        const purchasesQuery = `
-            SELECT pr.*, s.long_name
-            FROM purchase_requests pr
-            LEFT JOIN stocks s ON pr.symbol = s.symbol
-            WHERE pr.user_id = $1 AND pr.status = 'ACCEPTED'
-            ORDER BY pr.created_at DESC
-        `;
+        // Aquí implementarías el envío MQTT al canal stocks/requests
+        // Ejemplo usando mqtt client:
+        /*
+        const mqtt = require('mqtt');
+        const client = mqtt.connect(process.env.MQTT_BROKER_URL);
         
-        const result = await pool.query(purchasesQuery, [TEST_USER_ID]);
-        
-        res.json({
-            status: "success",
-            purchases: result.rows,
-            user_id: TEST_USER_ID
+        client.publish('stocks/requests', JSON.stringify(message), (err) => {
+            if (err) {
+                console.error('Error enviando mensaje MQTT:', err);
+            } else {
+                console.log('Solicitud enviada por MQTT:', message);
+            }
         });
+        */
+       /*
+        
+        console.log('Mensaje a enviar por MQTT:', message);
     } catch (error) {
-        console.error("Error obteniendo compras de prueba:", error);
-        res.status(500).json({ error: "Error interno del servidor" });
+        console.error('Error enviando solicitud MQTT:', error);
     }
-});
+}
 
-// Endpoint para verificar configuración de Auth0
-app.get('/auth0/config', (req, res) => {
-    res.json({
-        domain: process.env.AUTH0_DOMAIN,
-        audience: process.env.AUTH0_AUDIENCE,
-        client_id_configured: !!process.env.AUTH0_CLIENT_ID,
-        client_secret_configured: !!process.env.AUTH0_CLIENT_SECRET,
-        frontend_should_use: {
-            domain: process.env.AUTH0_DOMAIN,
-            clientId: process.env.AUTH0_CLIENT_ID,
-            audience: process.env.AUTH0_AUDIENCE,
-            scope: "openid profile email offline_access"
-        }
-    });
-});
+*/
 
-// Endpoint temporal de administración para agregar dinero a billeteras
-app.post('/admin/add-money', async (req, res) => {
-    try {
-        const { email, amount } = req.body;
-        
-        if (!email || !amount || isNaN(parseFloat(amount)) || parseFloat(amount) <= 0) {
-            return res.status(400).json({ 
-                error: "Email y monto válido son requeridos",
-                example: { email: "usuario@ejemplo.com", amount: 1000000000 }
-            });
-        }
-        
-        const amountValue = parseFloat(amount);
-        
-        // Buscar el usuario por email
-        const userQuery = `SELECT id FROM users WHERE email = $1`;
-        const userResult = await client.query(userQuery, [email]);
-        
-        if (userResult.rows.length === 0) {
-            return res.status(404).json({ 
-                error: `Usuario con email ${email} no encontrado`,
-                suggestion: "El usuario debe haber iniciado sesión al menos una vez para existir en la base de datos"
-            });
-        }
-        
-        const userId = userResult.rows[0].id;
-        
-        // Verificar si ya tiene billetera
-        const walletCheckQuery = `SELECT balance FROM wallet WHERE user_id = $1`;
-        const walletCheckResult = await client.query(walletCheckQuery, [userId]);
-        
-        if (walletCheckResult.rows.length === 0) {
-            // Crear billetera si no existe
-            await client.query(`
-                INSERT INTO wallet (user_id, balance, created_at, updated_at)
-                VALUES ($1, $2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            `, [userId, amountValue]);
-            
-            console.log(`💰 Billetera creada para ${email} con $${amountValue}`);
-        } else {
-            // Actualizar billetera existente
-            const updateQuery = `
-                UPDATE wallet
-                SET balance = balance + $2, updated_at = CURRENT_TIMESTAMP
-                WHERE user_id = $1
-                RETURNING balance
-            `;
-            
-            const updateResult = await client.query(updateQuery, [userId, amountValue]);
-            const newBalance = updateResult.rows[0].balance;
-            
-            console.log(`💰 $${amountValue} agregados a ${email}. Nuevo balance: $${newBalance}`);
-        }
-        
-        // Obtener balance final
-        const finalBalanceQuery = `SELECT balance FROM wallet WHERE user_id = $1`;
-        const finalBalanceResult = await client.query(finalBalanceQuery, [userId]);
-        const finalBalance = finalBalanceResult.rows[0].balance;
-        
-        // Registrar evento
-        await logEvent('ADMIN_WALLET_DEPOSIT', { 
-            target_email: email,
-            target_user_id: userId,
-            amount: amountValue, 
-            new_balance: finalBalance,
-            admin_action: true
-        });
-        
-        res.json({ 
-            success: true,
-            message: `$${amountValue.toLocaleString()} agregados exitosamente a ${email}`,
-            user_email: email,
-            user_id: userId,
-            amount_added: amountValue,
-            new_balance: finalBalance
-        });
-        
-    } catch (error) {
-        console.error("Error agregando dinero a billetera:", error);
-        res.status(500).json({ 
-            error: "Error interno del servidor", 
-            details: error.message 
-        });
-    }
-});
-
-app.listen(port, '0.0.0.0',() => {
-    console.log(`Servidor ejecutándose en http://localhost:${port}`);
-});
+// Endpoint para obtener información del usuario actua
