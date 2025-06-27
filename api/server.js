@@ -11,86 +11,15 @@ import axios from 'axios';
 import sequelize from './db/db.js';
 import { TransbankService } from './src/services/webpayService.js';
 import webpayRoutes from './src/routes/webpayRoutes.js';
-import adminRoutes from './src/routes/adminRoutes.js';
-import { corsOptions, customCorsMiddleware, webpayCorsmiddleware } from './cors-configuration.js';
-import * as auctionController from './src/controllers/auctionController.js';
-import * as exchangeController from './src/controllers/exchangeController.js';
-import * as adminController from './src/controllers/adminController.js';
-import { initializeDatabase } from './src/utils/initDatabase.js';
+import { isAdmin, requireAdmin } from './auth-integration.js';
 
 const Pool = pg.Pool;
 const app = express();
 const port = 3000;
 
-// 🔧 CONFIGURACIÓN DE BYPASS DE AUTENTICACIÓN PARA PRUEBAS
-const BYPASS_AUTH = process.env.BYPASS_AUTH === 'true' || process.env.NODE_ENV === 'development';
-
-// Middleware de bypass que simula un usuario autenticado
-const bypassAuthMiddleware = (req, res, next) => {
-    if (BYPASS_AUTH) {
-        console.log('🔧 BYPASS AUTH: Simulando usuario autenticado para pruebas');
-        // Simular usuario autenticado con ID fijo para pruebas
-        req.userId = 1;
-        req.auth = {
-            payload: {
-                sub: 'test-user-id',
-                email: 'test@ejemplo.com',
-                name: 'Usuario de Prueba'
-            }
-        };
-        next();
-    } else {
-        // Si no está en modo bypass, usar autenticación normal
-        return res.status(401).json({ 
-            error: "Autenticación requerida",
-            message: "Para usar el modo de pruebas, configura BYPASS_AUTH=true"
-        });
-    }
-};
-
-// Función helper para decidir qué middleware usar
-const conditionalAuth = (req, res, next) => {
-    if (BYPASS_AUTH) {
-        console.log('🔧 Usando bypass de autenticación');
-        return bypassAuthMiddleware(req, res, next);
-    } else {
-        console.log('🔐 Usando autenticación JWT normal');
-        return checkJwt(req, res, next);
-    }
-};
-
-const conditionalSyncUser = (req, res, next) => {
-    if (BYPASS_AUTH) {
-        console.log('🔧 Simulando sincronización de usuario');
-        // En modo bypass, ya tenemos req.userId = 1
-        return next();
-    } else {
-        return syncUser(req, res, next);
-    }
-};
-
-// ✅ APLICAR CORS DESPUÉS DE CREAR LA INSTANCIA DE EXPRESS
-app.use(cors(corsOptions));
-app.use(customCorsMiddleware);
-
-// Para rutas específicas de WebPay
-app.use('/webpay', webpayCorsmiddleware);
-
-// Middleware de debugging
-app.use('/api/purchases', (req, res, next) => {
-    console.log(`🔍 ${req.method} ${req.path} - Origin: ${req.get('Origin')}`);
-    next();
-});
-
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-app.use('/api/purchases', purchaseRoutes);
-app.use('/admin', conditionalAuth, conditionalSyncUser, adminRoutes);
-
 
 dotenv.config();
-
-const FRONTEND_URL = process.env.FRONTEND_URL || 'https://antonioescobar.lat';
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:80';
 
 const WORKERS_API_URL = process.env.WORKERS_API_URL || 'http://localhost:3000';
 
@@ -131,6 +60,7 @@ async function triggerEstimationCalculation(userId, purchaseData) {
     }
 }
 
+
 // Configuración de la base de datos
 const pool = new Pool({
     user: process.env.DB_USER || 'postgres',
@@ -140,9 +70,6 @@ const pool = new Pool({
     password: process.env.DB_PASSWORD || 'password',
 });
 
-// Hacer que el pool esté disponible para los controladores
-app.locals.pool = pool;
-
 // Crear middleware de sincronización de usuarios
 const syncUser = createSyncUserMiddleware(pool);
 const GROUP_ID = process.env.GROUP_ID || "1";
@@ -150,30 +77,34 @@ const GROUP_ID = process.env.GROUP_ID || "1";
 // CORREGIR: Configurar middleware de autenticación Auth0 con las variables correctas
 const checkJwt = auth({
     audience: process.env.AUTH0_AUDIENCE || 'https://stockmarket-api/',
-    issuerBaseURL: `https://${process.env.AUTH0_DOMAIN || 'dev-ouxdigl1l6bn6n3r.us.auth0.com'}`,
+    issuerBaseURL: `https://${process.env.AUTH0_DOMAIN}` || 'https://dev-ouxdigl1l6bn6n3r.us.auth0.com/',
     tokenSigningAlg: 'RS256'
 });
 
-// Middleware para verificar si el usuario es admin
-const checkAdmin = async (req, res, next) => {
-    try {
-        // Verificar si el usuario tiene rol de admin
-        const userQuery = `
-            SELECT role FROM users WHERE id = $1
-        `;
-        const result = await pool.query(userQuery, [req.userId]);
-        
-        if (result.rows.length === 0) {
-            return res.status(404).json({ error: "Usuario no encontrado" });
-        }
-        
-        req.isAdmin = result.rows[0].role === 'admin';
-        next();
-    } catch (error) {
-        console.error("Error verificando rol de admin:", error);
-        res.status(500).json({ error: "Error interno del servidor" });
-    }
-};
+// Webpay routes
+app.use('/webpay', webpayRoutes);
+
+// CORS configuration
+app.use(cors({
+    origin: ['http://localhost:80', 'http://localhost', 'http://localhost:5173', 
+        process.env.FRONTEND_URL, 'http://antonioescobar.lat',
+        'http://frontend-grupo1-iic2173.s3-website-us-east-1.amazonaws.com/',
+        'http://frontend-grupo1-iic2173.s3-website-us-east-1.amazonaws.com'].filter(Boolean),
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
+// Middleware de debugging
+app.use('/api/purchases', (req, res, next) => {
+    console.log(`🔍 ${req.method} ${req.path} - Origin: ${req.get('Origin')}`);
+    next();
+});
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use('/api/purchases', purchaseRoutes);
+
 
 const client = await pool.connect();
 
@@ -645,7 +576,7 @@ app.get('/user/profile', checkJwt, syncUser, async (req, res) => {
 
 
 // Endpoint de registro (se mantiene para compatibilidad, pero no es necesario usarlo)
-app.post('/users/register', conditionalAuth, conditionalSyncUser, async (req, res) => {
+app.post('/users/register', checkJwt, syncUser, async (req, res) => {
     try {
         // El usuario ya ha sido sincronizado en este punto
         res.status(200).json({ 
@@ -661,8 +592,8 @@ app.post('/users/register', conditionalAuth, conditionalSyncUser, async (req, re
 
 // NUEVOS ENDPOINTS PARA WALLET ==============================================
 
-// Endpoint de depósito en wallet
-app.post('/wallet/deposit', conditionalAuth, conditionalSyncUser, async (req, res) => {
+// Endpoint de depósito en wallet corregido
+app.post('/wallet/deposit', checkJwt, syncUser, async (req, res) => {
     try {
         const { amount } = req.body;
         
@@ -691,11 +622,7 @@ app.post('/wallet/deposit', conditionalAuth, conditionalSyncUser, async (req, re
             new_balance: newBalance 
         });
         
-        res.json({ 
-            success: true,
-            message: `Depósito de $${amountValue} realizado exitosamente`,
-            balance: newBalance 
-        });
+        res.json({ balance: newBalance });
     } catch (error) {
         console.error("Error al depositar en billetera:", error);
         res.status(500).json({ 
@@ -705,8 +632,8 @@ app.post('/wallet/deposit', conditionalAuth, conditionalSyncUser, async (req, re
     }
 });
 
-// Obtener saldo de la billetera
-app.get('/wallet/balance', conditionalAuth, conditionalSyncUser, async (req, res) => {
+// Obtener saldo de la billetera (versión mejorada)
+app.get('/wallet/balance', checkJwt, syncUser, async (req, res) => {
     try {
         // Obtener saldo de la billetera
         const walletQuery = `
@@ -727,8 +654,9 @@ app.get('/wallet/balance', conditionalAuth, conditionalSyncUser, async (req, res
 
 // ENDPOINTS DE COMPRA DE ACCIONES ===========================================
 
-// Comprar acciones
-app.post('/stocks/buy', conditionalAuth, conditionalSyncUser, async (req, res) => {
+// Comprar acciones (versión mejorada)
+// Comprar acciones (versión corregida para WebPay)
+app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
     try {
         const { symbol, quantity } = req.body;
         
@@ -736,7 +664,7 @@ app.post('/stocks/buy', conditionalAuth, conditionalSyncUser, async (req, res) =
             return res.status(400).json({ error: "Solicitud de compra inválida" });
         }
         
-        console.log(`🛒 Procesando compra directa: ${quantity} acciones de ${symbol}`);
+        console.log(`Procesando solicitud de compra: ${quantity} acciones de ${symbol}`);
         
         // Obtener precio actual y disponibilidad de la acción
         const stockQuery = `
@@ -760,107 +688,105 @@ app.post('/stocks/buy', conditionalAuth, conditionalSyncUser, async (req, res) =
         
         const totalCost = stock.price * quantity;
 
-        // Verificar saldo del usuario
-        const balanceQuery = `SELECT balance FROM wallet WHERE user_id = $1`;
-        const balanceResult = await client.query(balanceQuery, [req.userId]);
-        
-        if (balanceResult.rows.length === 0) {
-            return res.status(404).json({ error: "Usuario no encontrado" });
-        }
-        
-        const userBalance = balanceResult.rows[0].balance;
-        
-        if (userBalance < totalCost) {
-            return res.status(400).json({ 
-                error: `Saldo insuficiente. Necesitas $${totalCost.toLocaleString()} pero tienes $${userBalance.toLocaleString()}` 
-            });
-        }
-
-        console.log(`💰 Costo total: $${totalCost}, saldo usuario: $${userBalance}`);
+        // ✅ SIN VERIFICACIÓN DE WALLET - El pago se valida via WebPay
+        console.log(`💰 Total a pagar: $${totalCost} (será validado por WebPay)`);
         
         // Generar UUID para la solicitud
         const requestId = uuidv4();
+        const shortRequestId = requestId.split('-')[0]; 
+        const buyOrder = `${symbol}-${shortRequestId}`;
+        const sessionId = `session-${req.userId}-${Date.now()}`;
+        const returnUrl = process.env.TRANSBANK_RETURN_URL || 'http://localhost:3000/webpay/return';
 
-        // Iniciar transacción de base de datos
-        await client.query('BEGIN');
-
-        try {
-            // 1. Descontar del saldo del usuario
-            await client.query(
-                `UPDATE wallet SET balance = balance - $1 WHERE user_id = $2`,
-                [totalCost, req.userId]
-            );
-
-            // 2. Reducir cantidad de acciones disponibles
-            await client.query(
-                `UPDATE stocks SET quantity = quantity - $1 WHERE id = $2`,
-                [quantity, stock.id]
-            );
-
-            // 3. Crear registro de compra en purchase_requests
-            const purchaseQuery = `
-                INSERT INTO purchase_requests 
-                (request_id, user_id, symbol, quantity, price, status) 
-                VALUES ($1, $2, $3, $4, $5, 'ACCEPTED')
-                RETURNING id
-            `;
-            
-            await client.query(purchaseQuery, [
-                requestId, 
-                req.userId,
-                symbol, 
-                quantity, 
-                stock.price
-            ]);
-
-            // ✨ NUEVO: También insertar en la tabla purchases para que aparezca en "Mis Acciones"
-            await client.query(`
-                INSERT INTO purchases (user_id, symbol, quantity, price_at_purchase, status)
-                VALUES ($1, $2, $3, $4, 'COMPLETED')
-            `, [req.userId, symbol, quantity, stock.price]);
-
-            // 4. Registrar evento
-            await logEvent('PURCHASE_DIRECT', {
-                request_id: requestId,
-                user_id: req.userId,
-                symbol: symbol,
-                quantity: quantity,
-                price: stock.price,
-                total_cost: totalCost,
-                group_id: GROUP_ID
+        // 1. CREAR TRANSACCIÓN WEBPAY
+        const webpayResult = await TransbankService.createTransaction(
+            buyOrder,
+            sessionId,
+            totalCost,
+            returnUrl
+        );
+        
+        if (!webpayResult.success) {
+            console.error("Error al crear transacción webpay:", webpayResult.error);
+            return res.status(500).json({
+                error: "Error al procesar el pago",
+                details: webpayResult.error
             });
-
-            // Confirmar transacción
-            await client.query('COMMIT');
-
-            console.log(`✅ Compra exitosa: ${quantity} acciones de ${symbol} por $${totalCost}`);
-            
-            res.json({
-                message: `Compra exitosa: ${quantity} acciones de ${symbol} por $${totalCost.toLocaleString()}`,
-                success: true,
-                request_id: requestId,
-                symbol: symbol,
-                quantity: quantity,
-                totalCost: totalCost,
-                newBalance: userBalance - totalCost
-            });
-            
-        } catch (dbError) {
-            // Revertir transacción en caso de error
-            await client.query('ROLLBACK');
-            throw dbError;
         }
+
+        console.log(`Transacción WebPay creada exitosamente: ${webpayResult.token}`);
+
+        // 2. GUARDAR TRANSACCIÓN EN BASE DE DATOS
+        const webpayTransactionQuery = `
+            INSERT INTO webpay_transactions
+            (user_id, buy_order, session_id, token_ws, amount, status, symbol, quantity, request_id, created_at)
+            VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7, $8, NOW())
+            RETURNING id
+        `;
+        
+        await client.query(webpayTransactionQuery, [
+            req.userId,
+            buyOrder,
+            sessionId,
+            webpayResult.token,
+            totalCost,
+            symbol,
+            quantity,
+            requestId
+        ]);
+
+        // 3. CREAR SOLICITUD DE COMPRA EN PURCHASE_REQUESTS
+        const purchaseQuery = `
+            INSERT INTO purchase_requests 
+            (request_id, user_id, symbol, quantity, price, status) 
+            VALUES ($1, $2, $3, $4, $5, 'PENDING')
+            RETURNING id
+        `;
+        
+        await client.query(purchaseQuery, [
+            requestId, 
+            req.userId,
+            symbol, 
+            quantity, 
+            stock.price
+        ]);
+
+        // 4. RESERVAR ACCIONES TEMPORALMENTE
+        console.log(`📊 Acciones disponibles: ${stock.quantity}, solicitadas: ${quantity}`);
+
+        console.log(`💾 Solicitud de compra creada: ${requestId}, esperando confirmación de pago WebPay`);
+
+        // 6. REGISTRAR EVENTO
+        await logEvent('PURCHASE_REQUEST', {
+            request_id: requestId,
+            user_id: req.userId,
+            symbol: symbol,
+            quantity: quantity,
+            price: stock.price,
+            group_id: GROUP_ID,
+            webpay_token: webpayResult.token,
+            deposit_token: webpayResult.token
+        });
+        
+        // 7. RETORNAR DATOS PARA REDIRECCIÓN A WEBPAY
+        res.json({
+            message: "Transacción de pago creada exitosamente",
+            requiresPayment: true,
+            webpayUrl: webpayResult.url,
+            webpayToken: webpayResult.token,
+            request_id: requestId
+        });
         
     } catch (error) {
-        console.error("❌ Error procesando compra:", error);
+        console.error("Error procesando compra:", error);
         res.status(500).json({ error: "Error interno del servidor" });
     }
 });
 
 
 
-// Obtener compras del usuario (versión mejorada) - CON AUTENTICACIÓN RESTAURADA
-app.get('/purchases', conditionalAuth, conditionalSyncUser, async (req, res) => {
+// Obtener compras del usuario (versión mejorada)
+app.get('/purchases', checkJwt, syncUser, async (req, res) => {
     try {
         // Obtener compras del usuario con una consulta mejorada que evita duplicados
         const purchasesQuery = `
@@ -1207,7 +1133,7 @@ app.get('/check-request', async (req, res) => {
 // Agregar este endpoint de depuración después de los demás endpoints
 
 // Endpoint de depuración de token JWT
-app.get('/debug/token', conditionalAuth, async (req, res) => {
+app.get('/debug/token', checkJwt, async (req, res) => {
     try {
         // 1. Extraer el token del encabezado
         const authHeader = req.headers.authorization || '';
@@ -1382,7 +1308,7 @@ app.get('/workers/health', async (req, res) => {
 });
 
 // Endpoint para obtener estimación de una compra específica
-app.get('/purchase/:requestId/estimation', conditionalAuth, conditionalSyncUser, async (req, res) => {
+app.get('/purchase/:requestId/estimation', checkJwt, syncUser, async (req, res) => {
     try {
         const { requestId } = req.params;
         
@@ -1430,457 +1356,98 @@ app.get('/purchase/:requestId/estimation', conditionalAuth, conditionalSyncUser,
         res.status(500).json({ error: 'Error obteniendo estimación de compra' });
     }
 });
-// NUEVAS RUTAS PARA SUBASTAS (RF04) - TEMPORALMENTE SIN AUTENTICACIÓN
-// Crear una subasta (SIN AUTH TEMPORAL)
-app.post('/auctions', auctionController.createAuction);
-
-// Obtener subastas activas (PÚBLICO - no requiere auth)
-app.get('/auctions', auctionController.getActiveAuctions);
-
-// Hacer una oferta en una subasta (SIN AUTH TEMPORAL)
-app.post('/auctions/:auction_id/bid', auctionController.placeBid);
-
-// Cerrar una subasta (SIN AUTH TEMPORAL)
-app.post('/auctions/:auction_id/close', auctionController.closeAuction);
-
-// Procesar subastas externas (desde MQTT)
-app.post('/auctions/external', auctionController.processExternalAuction);
-
-// Procesar ofertas externas del formato del enunciado (desde MQTT)
-app.post('/external-offers', async (req, res) => {
-    try {
-        const offerData = req.body;
-        const pool = req.app.locals.pool;
-        
-        console.log("Procesando oferta externa:", offerData);
-        
-        // Insertar o actualizar la oferta externa en la base de datos
-        const insertQuery = `
-            INSERT INTO external_auctions (auction_id, group_id, symbol, quantity, timestamp, status)
-            VALUES ($1, $2, $3, $4, $5, 'ACTIVE')
-            ON CONFLICT (auction_id) 
-            DO UPDATE SET 
-                group_id = EXCLUDED.group_id,
-                symbol = EXCLUDED.symbol,
-                quantity = EXCLUDED.quantity,
-                timestamp = EXCLUDED.timestamp,
-                updated_at = CURRENT_TIMESTAMP
-            RETURNING *
-        `;
-        
-        const result = await pool.query(insertQuery, [
-            offerData.auction_id,
-            offerData.group_id,
-            offerData.symbol,
-            offerData.quantity,
-            offerData.timestamp
-        ]);
-        
-        console.log(`Oferta externa guardada: ${offerData.symbol} del grupo ${offerData.group_id}`);
-        
-        res.json({ 
-            status: "success", 
-            message: "Oferta externa procesada",
-            offer: result.rows[0]
-        });
-    } catch (error) {
-        console.error("Error procesando oferta externa:", error);
-        res.status(500).json({ error: "Error interno del servidor" });
-    }
+app.listen(port, '0.0.0.0',() => {
+    console.log(`Servidor ejecutándose en http://localhost:${port}`);
 });
-
-// NUEVAS RUTAS PARA INTERCAMBIOS (RF05) - TEMPORALMENTE SIN AUTENTICACIÓN
-// Proponer un intercambio (SIN AUTH TEMPORAL)
-app.post('/exchanges', exchangeController.proposeExchange);
-
-// Responder a un intercambio (aceptar/rechazar) (SIN AUTH TEMPORAL)
-app.post('/exchanges/:exchange_id/respond', exchangeController.respondToExchange);
-
-// Obtener intercambios pendientes (SIN AUTH TEMPORAL)
-app.get('/exchanges/pending', exchangeController.getPendingExchanges);
-
-// Obtener historial de intercambios (SIN AUTH TEMPORAL)
-app.get('/exchanges/history', exchangeController.getExchangeHistory);
-
-// Procesar propuestas externas (desde MQTT)
-app.post('/exchanges/proposal', exchangeController.processExternalProposal);
-
-// Procesar respuestas externas (desde MQTT)
-app.post('/exchanges/response', exchangeController.processExternalResponse);
-
-// Endpoint simple de health check
-app.get('/health', (req, res) => {
-    res.json({ 
-        status: 'ok', 
-        timestamp: new Date().toISOString(),
-        service: 'StockMarketU API'
-    });
-});
-
-// ===============================================
-// RUTAS DE ADMINISTRADOR (REQUIEREN AUTENTICACIÓN DE ADMIN)
-// ===============================================
-
-// Promover usuario a administrador (solo configuración inicial)
-// ===============================================
-// RUTAS DE ADMIN MOVIDAS A adminRoutes.js
-// ===============================================
-
-// ===============================================
-// ENDPOINTS DE PRUEBA SIN AUTENTICACIÓN
-// ===============================================
-
-// Crear subasta de prueba
-app.post('/test/auctions', async (req, res) => {
-    try {
-        const { symbol, quantity, starting_price, duration_minutes } = req.body;
-        
-        if (!symbol || !quantity || !starting_price || !duration_minutes) {
-            return res.status(400).json({ 
-                error: "Faltan parámetros requeridos",
-                required: ["symbol", "quantity", "starting_price", "duration_minutes"]
-            });
-        }
-        
-        const pool = req.app.locals.pool;
-        const client = await pool.connect();
-        
-        try {
-            await client.query('BEGIN');
-            
-            // Verificar stocks disponibles
-            const stockQuery = `SELECT SUM(quantity) as total_quantity FROM stocks WHERE symbol = $1 AND quantity > 0`;
-            const stockResult = await client.query(stockQuery, [symbol]);
-            
-            if (!stockResult.rows[0] || stockResult.rows[0].total_quantity < quantity) {
-                await client.query('ROLLBACK');
-                return res.status(400).json({ error: "No hay suficientes acciones disponibles" });
-            }
-            
-            // Crear subasta
-            const auctionId = uuidv4();
-            const endTime = new Date(Date.now() + duration_minutes * 60 * 1000);
-            const GROUP_ID = process.env.GROUP_ID || "1";
-            
-            const insertQuery = `
-                INSERT INTO auctions (id, group_id, symbol, quantity, starting_price, current_price, end_time, status)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, 'ACTIVE')
-                RETURNING *
-            `;
-            
-            const auctionResult = await client.query(insertQuery, [
-                auctionId, GROUP_ID, symbol, quantity, starting_price, starting_price, endTime
-            ]);
-            
-            // Reservar acciones
-            await client.query(`
-                UPDATE stocks SET quantity = quantity - $1 
-                WHERE symbol = $2 AND id = (SELECT id FROM stocks WHERE symbol = $2 AND quantity > 0 ORDER BY timestamp DESC LIMIT 1)
-            `, [quantity, symbol]);
-            
-            await client.query('COMMIT');
-            
-            res.status(201).json({
-                status: "success",
-                message: "Subasta de prueba creada",
-                auction: auctionResult.rows[0]
-            });
-            
-        } finally {
-            client.release();
-        }
-        
-    } catch (error) {
-        console.error("Error en subasta de prueba:", error);
-        res.status(500).json({ error: "Error interno del servidor" });
-    }
-});
-
-// Hacer oferta de prueba
-app.post('/test/auctions/:auction_id/bid', async (req, res) => {
-    try {
-        const { auction_id } = req.params;
-        const { bid_amount } = req.body;
-        const GROUP_ID = process.env.GROUP_ID || "1";
-        
-        if (!bid_amount || bid_amount <= 0) {
-            return res.status(400).json({ error: "El monto de la oferta debe ser positivo" });
-        }
-        
-        const pool = req.app.locals.pool;
-        const client = await pool.connect();
-        
-        try {
-            await client.query('BEGIN');
-            
-            // Verificar subasta
-            const auctionQuery = `SELECT * FROM auctions WHERE id = $1 AND status = 'ACTIVE' AND end_time > NOW()`;
-            const auctionResult = await client.query(auctionQuery, [auction_id]);
-            
-            if (auctionResult.rows.length === 0) {
-                await client.query('ROLLBACK');
-                return res.status(404).json({ error: "Subasta no encontrada o ya cerrada" });
-            }
-            
-            const auction = auctionResult.rows[0];
-            
-            if (bid_amount <= auction.current_price) {
-                await client.query('ROLLBACK');
-                return res.status(400).json({ 
-                    error: "La oferta debe ser mayor al precio actual",
-                    current_price: auction.current_price
-                });
-            }
-            
-            // Insertar oferta
-            const bidId = uuidv4();
-            await client.query(`
-                INSERT INTO auction_bids (id, auction_id, bidder_group_id, bid_amount)
-                VALUES ($1, $2, $3, $4)
-            `, [bidId, auction_id, GROUP_ID, bid_amount]);
-            
-            // Actualizar precio actual
-            await client.query(`
-                UPDATE auctions SET current_price = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2
-            `, [bid_amount, auction_id]);
-            
-            await client.query('COMMIT');
-            
-            res.json({
-                status: "success",
-                message: "Oferta de prueba realizada",
-                bid: { id: bidId, auction_id: auction_id, bid_amount: bid_amount }
-            });
-            
-        } finally {
-            client.release();
-        }
-        
-    } catch (error) {
-        console.error("Error en oferta de prueba:", error);
-        res.status(500).json({ error: "Error interno del servidor" });
-    }
-});
-
-// Proponer intercambio de prueba
-app.post('/test/exchanges', async (req, res) => {
-    try {
-        const { target_group_id, offered_symbol, offered_quantity, requested_symbol, requested_quantity } = req.body;
-        const GROUP_ID = process.env.GROUP_ID || "1";
-        
-        if (!target_group_id || !offered_symbol || !offered_quantity || !requested_symbol || !requested_quantity) {
-            return res.status(400).json({ 
-                error: "Faltan parámetros requeridos",
-                required: ["target_group_id", "offered_symbol", "offered_quantity", "requested_symbol", "requested_quantity"]
-            });
-        }
-        
-        const pool = req.app.locals.pool;
-        const client = await pool.connect();
-        
-        try {
-            await client.query('BEGIN');
-            
-            // Verificar stocks disponibles
-            const stockQuery = `SELECT SUM(quantity) as total_quantity FROM stocks WHERE symbol = $1 AND quantity > 0`;
-            const stockResult = await client.query(stockQuery, [offered_symbol]);
-            
-            if (!stockResult.rows[0] || stockResult.rows[0].total_quantity < offered_quantity) {
-                await client.query('ROLLBACK');
-                return res.status(400).json({ error: "No hay suficientes acciones para ofrecer" });
-            }
-            
-            // Crear intercambio
-            const exchangeId = uuidv4();
-            const insertQuery = `
-                INSERT INTO exchanges (id, origin_group_id, target_group_id, offered_symbol, offered_quantity, requested_symbol, requested_quantity, status)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, 'PENDING')
-                RETURNING *
-            `;
-            
-            const exchangeResult = await client.query(insertQuery, [
-                exchangeId, parseInt(GROUP_ID), target_group_id, offered_symbol, offered_quantity, requested_symbol, requested_quantity
-            ]);
-            
-            // Reservar acciones ofrecidas
-            await client.query(`
-                UPDATE stocks SET quantity = quantity - $1 
-                WHERE symbol = $2 AND id = (SELECT id FROM stocks WHERE symbol = $2 AND quantity > 0 ORDER BY timestamp DESC LIMIT 1)
-            `, [offered_quantity, offered_symbol]);
-            
-            await client.query('COMMIT');
-            
-            res.status(201).json({
-                status: "success",
-                message: "Intercambio de prueba propuesto",
-                exchange: exchangeResult.rows[0]
-            });
-            
-        } finally {
-            client.release();
-        }
-        
-    } catch (error) {
-        console.error("Error en intercambio de prueba:", error);
-        res.status(500).json({ error: "Error interno del servidor" });
-    }
-});
-
-// ===============================================
-// ENDPOINTS DE PRUEBA PARA COMPRAS Y BILLETERA
-// ===============================================
-
-// Ver saldo de prueba
-app.get('/test/wallet/balance', async (req, res) => {
-    try {
-        const pool = req.app.locals.pool;
-        const TEST_USER_ID = 1;
-        
-        const walletQuery = `SELECT balance FROM wallet WHERE user_id = $1`;
-        const walletResult = await pool.query(walletQuery, [TEST_USER_ID]);
-        
-        const balance = walletResult.rows[0]?.balance || 0;
-        
-        res.json({ 
-            balance: balance,
-            user_id: TEST_USER_ID,
-            message: "Saldo de usuario de prueba"
-        });
-    } catch (error) {
-        console.error("Error obteniendo saldo de prueba:", error);
-        res.status(500).json({ error: "Error interno del servidor" });
-    }
-});
-
-// Depositar dinero de prueba
-app.post('/test/wallet/deposit', async (req, res) => {
-    try {
-        const { amount } = req.body;
-        const pool = req.app.locals.pool;
-        const TEST_USER_ID = 1;
-        
-        if (!amount || amount <= 0) {
-            return res.status(400).json({ error: "Monto inválido" });
-        }
-        
-        const updateQuery = `
-            UPDATE wallet 
-            SET balance = balance + $2, updated_at = CURRENT_TIMESTAMP
-            WHERE user_id = $1
-            RETURNING balance
-        `;
-        
-        const result = await pool.query(updateQuery, [TEST_USER_ID, amount]);
-        
-        res.json({
-            status: "success",
-            message: `Depósito de $${amount} realizado`,
-            new_balance: result.rows[0].balance,
-            user_id: TEST_USER_ID
-        });
-    } catch (error) {
-        console.error("Error en depósito de prueba:", error);
-        res.status(500).json({ error: "Error interno del servidor" });
-    }
-});
-
-// Comprar acciones de prueba
-app.post('/test/stocks/buy', async (req, res) => {
+/* HARDCODEADO PARA QUE COMPRAS DE ADMIN SEAN DISTINTAS. PROBABLEMENTE HAY QUE CAMBIARLO/BORRARLO
+// Endpoint para compras administrativas
+app.post('/admin/stocks/buy', checkJwt, syncUser, requireAdmin, async (req, res) => {
     try {
         const { symbol, quantity } = req.body;
-        const pool = req.app.locals.pool;
-        const client = await pool.connect();
-        const TEST_USER_ID = 1;
         
         if (!symbol || !quantity || quantity <= 0) {
             return res.status(400).json({ error: "Solicitud de compra inválida" });
         }
         
-        try {
-            await client.query('BEGIN');
-            
-            // Obtener precio actual de la acción
-            const stockQuery = `
-                SELECT * FROM stocks 
-                WHERE symbol = $1 
-                ORDER BY timestamp DESC 
-                LIMIT 1
-            `;
-            
-            const stockResult = await client.query(stockQuery, [symbol]);
-            
-            if (stockResult.rows.length === 0) {
-                await client.query('ROLLBACK');
-                return res.status(404).json({ error: "Acción no encontrada" });
-            }
-            
-            const stock = stockResult.rows[0];
-            
-            if (stock.quantity < quantity) {
-                await client.query('ROLLBACK');
-                return res.status(400).json({ error: "No hay suficientes acciones disponibles" });
-            }
-            
-            const totalCost = stock.price * quantity;
-            
-            // Verificar saldo del usuario
-            const balanceQuery = `SELECT balance FROM wallet WHERE user_id = $1`;
-            const balanceResult = await client.query(balanceQuery, [TEST_USER_ID]);
-            
-            if (balanceResult.rows.length === 0 || balanceResult.rows[0].balance < totalCost) {
-                await client.query('ROLLBACK');
-                return res.status(400).json({ 
-                    error: `Saldo insuficiente. Necesitas $${totalCost} pero tienes $${balanceResult.rows[0]?.balance || 0}` 
-                });
-            }
-            
-            // Actualizar saldo
-            await client.query(`
-                UPDATE wallet 
-                SET balance = balance - $2 
-                WHERE user_id = $1
-            `, [TEST_USER_ID, totalCost]);
-            
-            // Actualizar inventario
-            await client.query(`
-                UPDATE stocks 
-                SET quantity = quantity - $1 
-                WHERE id = $2
-            `, [quantity, stock.id]);
-            
-            // Registrar compra
-            const purchaseId = uuidv4();
-            await client.query(`
-                INSERT INTO purchase_requests (request_id, user_id, symbol, quantity, price, status, created_at)
-                VALUES ($1, $2, $3, $4, $5, 'ACCEPTED', CURRENT_TIMESTAMP)
-            `, [purchaseId, TEST_USER_ID, symbol, quantity, stock.price]);
-            
-            await client.query('COMMIT');
-            
-            res.json({
-                status: "success",
-                message: `Compra exitosa: ${quantity} acciones de ${symbol}`,
-                purchase: {
-                    id: purchaseId,
-                    symbol: symbol,
-                    quantity: quantity,
-                    price: stock.price,
-                    total_cost: totalCost
-                }
-            });
-            
-        } finally {
-            client.release();
+        console.log(`Procesando compra administrativa: ${quantity} acciones de ${symbol}`);
+        
+        // Obtener precio actual y disponibilidad de la acción
+        const stockQuery = `
+            SELECT * FROM stocks 
+            WHERE symbol = $1 
+            ORDER BY timestamp DESC 
+            LIMIT 1
+        `;
+        
+        const stockResult = await client.query(stockQuery, [symbol]);
+        
+        if (stockResult.rows.length === 0) {
+            return res.status(404).json({ error: "Acción no encontrada" });
         }
         
+        const stock = stockResult.rows[0];
+        
+        if (stock.quantity < quantity) {
+            return res.status(400).json({ error: "No hay suficientes acciones disponibles" });
+        }
+        
+        const totalCost = stock.price * quantity;
+        const requestId = uuidv4();
+        
+        // Para administradores: procesar directamente sin WebPay
+        // 1. Actualizar inventario de acciones
+        await client.query(`
+            UPDATE stocks 
+            SET quantity = quantity - $1 
+            WHERE id = $2
+        `, [quantity, stock.id]);
+        
+        // 2. Crear registro de compra administrativa
+        const purchaseQuery = `
+            INSERT INTO purchase_requests 
+            (request_id, user_id, symbol, quantity, price, status, is_admin_purchase) 
+            VALUES ($1, $2, $3, $4, $5, 'ACCEPTED', TRUE)
+            RETURNING id
+        `;
+        
+        await client.query(purchaseQuery, [
+            requestId, 
+            req.userId,
+            symbol, 
+            quantity, 
+            stock.price
+        ]);
+        
+        // 3. Enviar solicitud por MQTT al canal stocks/requests
+        await sendStockRequest(symbol, quantity, stock.price, requestId);
+        
+        // 4. Registrar evento
+        await logEvent('ADMIN_PURCHASE', {
+            request_id: requestId,
+            user_id: req.userId,
+            symbol: symbol,
+            quantity: quantity,
+            price: stock.price,
+            group_id: GROUP_ID,
+            stock_origin: GROUP_ID // Cambiar por número de grupo
+        });
+        
+        res.json({
+            message: "Compra administrativa procesada exitosamente",
+            request_id: requestId,
+            symbol: symbol,
+            quantity: quantity,
+            total_cost: totalCost
+        });
+        
     } catch (error) {
-        console.error("Error en compra de prueba:", error);
+        console.error("Error procesando compra administrativa:", error);
         res.status(500).json({ error: "Error interno del servidor" });
     }
 });
 
-// Ver mis compras de prueba
-app.get('/test/purchases', async (req, res) => {
+// Función para enviar solicitud MQTT
+async function sendStockRequest(symbol, quantity, price, requestId) {
     try {
         const message = {
             request_id: requestId,
