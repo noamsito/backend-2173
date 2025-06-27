@@ -523,29 +523,57 @@ app.get('/stocks/:symbol', async (req, res) => {
 });
 
 // Endpoints de perfil y registro existentes
+// ...existing code...
+
+// Endpoint para obtener información del usuario actual
 app.get('/user/profile', checkJwt, syncUser, async (req, res) => {
     try {
-        // El usuario ya está sincronizado por el middleware
-        const userQuery = `
-            SELECT u.*, w.balance 
-            FROM users u 
-            LEFT JOIN wallet w ON u.id = w.user_id 
-            WHERE u.id = $1
-        `;
-        const userResult = await client.query(userQuery, [req.userId]);
+        const client = await pool.connect();
         
-        if (userResult.rows.length === 0) {
-            return res.status(404).json({ error: "Usuario no encontrado" });
+        try {
+            const userQuery = `
+                SELECT id, email, name, is_admin, last_login 
+                FROM users 
+                WHERE id = $1
+            `;
+            
+            const result = await client.query(userQuery, [req.userId]);
+            
+            if (result.rows.length === 0) {
+                return res.status(404).json({ error: "Usuario no encontrado" });
+            }
+            
+            const user = result.rows[0];
+            
+            // Verificar admin desde token también
+            const rolesFromToken = req.auth?.payload?.['https://stockmarket-app/roles'] || [];
+            const isAdminFromToken = rolesFromToken.includes('admin') || rolesFromToken.includes('administrator');
+            
+            // Usar el valor más permisivo (si cualquiera de los dos dice que es admin)
+            const isAdmin = user.is_admin || isAdminFromToken || req.isAdmin;
+            
+            console.log('DEBUG Profile - DB admin:', user.is_admin);
+            console.log('DEBUG Profile - Token admin:', isAdminFromToken);
+            console.log('DEBUG Profile - Req admin:', req.isAdmin);
+            console.log('DEBUG Profile - Final admin:', isAdmin);
+            
+            res.json({
+                id: user.id,
+                email: user.email,
+                name: user.name,
+                isAdmin: isAdmin,
+                lastLogin: user.last_login
+            });
+            
+        } finally {
+            client.release();
         }
-        
-        const user = userResult.rows[0];
-        
-        res.json({ status: "success", data: user });
     } catch (error) {
-        console.error("Error obteniendo perfil de usuario:", error);
-        res.status(500).json({ error: "Error interno del servidor" });
+        console.error('Error obteniendo perfil:', error);
+        res.status(500).json({ error: 'Error obteniendo información del usuario' });
     }
 });
+
 
 // Endpoint de registro (se mantiene para compatibilidad, pero no es necesario usarlo)
 app.post('/users/register', checkJwt, syncUser, async (req, res) => {
@@ -1454,36 +1482,4 @@ async function sendStockRequest(symbol, quantity, price, requestId) {
 
 */
 
-// Endpoint para obtener información del usuario actual
-app.get('/user/profile', checkJwt, syncUser, async (req, res) => {
-    try {
-        const client = await pool.connect();
-        
-        const userQuery = `
-            SELECT id, email, name, is_admin, last_login 
-            FROM users 
-            WHERE id = $1
-        `;
-        
-        const result = await client.query(userQuery, [req.userId]);
-        client.release();
-        
-        if (result.rows.length === 0) {
-            return res.status(404).json({ error: "Usuario no encontrado" });
-        }
-        
-        const user = result.rows[0];
-        
-        res.json({
-            id: user.id,
-            email: user.email,
-            name: user.name,
-            isAdmin: user.is_admin || req.isAdmin, // Doble verificación
-            lastLogin: user.last_login
-        });
-        
-    } catch (error) {
-        console.error('Error obteniendo perfil:', error);
-        res.status(500).json({ error: 'Error obteniendo información del usuario' });
-    }
-});
+// Endpoint para obtener información del usuario actua

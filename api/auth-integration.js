@@ -87,6 +87,8 @@ export function requireAdmin(req, res, next) {
  * @param {Object} pool - Pool de conexión a PostgreSQL
  * @returns {Function} - Middleware de Express
  */
+// ...existing code...
+
 export function createSyncUserMiddleware(pool) {
   return async (req, res, next) => {
     try {
@@ -96,8 +98,20 @@ export function createSyncUserMiddleware(pool) {
       // Extraer ID de Auth0 del token JWT
       let auth0Id = req.auth?.payload?.sub || req.auth?.sub;
 
-      const roles = req.auth?.payload?.['https://stockmarket-app/roles'] || [];
-      const isUserAdmin = roles.includes('admin') || roles.includes('administrator');
+      // Verificar roles de admin con múltiples variaciones
+      const roles = req.auth?.payload?.['https://stockmarket-app/roles'] || 
+                   req.auth?.payload?.roles || 
+                   req.auth?.payload?.['https://stockmarket-app/app_metadata']?.roles || 
+                   [];
+      
+      const isUserAdmin = roles.includes('admin') || 
+                         roles.includes('administrator') || 
+                         roles.includes('Admin') ||
+                         req.auth?.payload?.['https://stockmarket-app/app_metadata']?.roles?.includes('admin');
+
+      console.log('DEBUG - Token completo:', JSON.stringify(req.auth?.payload, null, 2));
+      console.log('DEBUG - Roles encontrados:', roles);
+      console.log('DEBUG - Es admin:', isUserAdmin);
       
       // Si no tenemos auth0Id desde req.auth, intentamos extraerlo manualmente del token
       if (!auth0Id && req.headers.authorization) {
@@ -129,7 +143,7 @@ export function createSyncUserMiddleware(pool) {
       
       try {
         // Verificar si el usuario ya existe
-        const checkQuery = `SELECT id FROM users WHERE auth0_id = $1`;
+        const checkQuery = `SELECT id, is_admin FROM users WHERE auth0_id = $1`;
         
         const checkResult = await client.query(checkQuery, [auth0Id]);
 
@@ -166,8 +180,7 @@ export function createSyncUserMiddleware(pool) {
             });
           }
           
-          
-          console.log("Creando usuario con:", { auth0Id, email: userEmail, name: userName || "Usuario" });
+          console.log("Creando usuario con:", { auth0Id, email: userEmail, name: userName || "Usuario", isAdmin: isUserAdmin });
           
           // 5. Crear el usuario en nuestra base de datos
           await client.query('BEGIN');
@@ -193,7 +206,7 @@ export function createSyncUserMiddleware(pool) {
           await client.query(createWalletQuery, [req.userId]);
           await client.query('COMMIT');
           
-          console.log(`Usuario creado con ID: ${req.userId}`);
+          console.log(`Usuario creado con ID: ${req.userId}, Admin: ${isUserAdmin}`);
         } else {
           // Usuario ya existe
           req.userId = checkResult.rows[0].id;
@@ -203,6 +216,8 @@ export function createSyncUserMiddleware(pool) {
             `UPDATE users SET last_login = CURRENT_TIMESTAMP, is_admin = $2 WHERE id = $1`,
             [req.userId, isUserAdmin]
           );
+          
+          console.log(`Usuario existente actualizado: ${req.userId}, Admin: ${isUserAdmin}`);
         }
 
         // Agregar información de admin al request
