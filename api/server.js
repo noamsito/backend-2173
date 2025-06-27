@@ -395,77 +395,102 @@ app.get('/stocks', async (req, res) => {
 
     try {
         let query = `
-            SELECT DISTINCT ON (symbol) *
-            FROM stocks
+            SELECT 
+                symbol, price, long_name, quantity, timestamp,
+                'original' as stock_type, null as discount_percentage, null as original_price
+            FROM (
+                SELECT DISTINCT ON (symbol) *
+                FROM stocks
+                ORDER BY symbol, timestamp DESC
+            ) s
+            WHERE quantity > 0
+            
+            UNION ALL
+            
+            SELECT 
+                symbol, resale_price as price, long_name, available_quantity as quantity, 
+                created_at as timestamp, 'resale' as stock_type, 
+                discount_percentage, original_price
+            FROM resale_stocks
+            WHERE available_quantity > 0
         `;
         
         const values = [];
         let paramIndex = 1;
-        let whereClauseAdded = false;
+        let havingClause = '';
         
-        // Construir la cláusula WHERE con los filtros
+        // Construir filtros (aplicar después del UNION)
         if (symbol) {
-            query += whereClauseAdded ? ' AND ' : ' WHERE ';
-            query += `symbol ILIKE $${paramIndex}`;
+            havingClause += havingClause ? ' AND ' : ' WHERE ';
+            havingClause += `symbol ILIKE $${paramIndex}`;
             values.push(`%${symbol}%`);
             paramIndex++;
-            whereClauseAdded = true;
         }
         
         if (name) {
-            query += whereClauseAdded ? ' AND ' : ' WHERE ';
-            query += `long_name ILIKE $${paramIndex}`;
+            havingClause += havingClause ? ' AND ' : ' WHERE ';
+            havingClause += `long_name ILIKE $${paramIndex}`;
             values.push(`%${name}%`);
             paramIndex++;
-            whereClauseAdded = true;
         }
         
         if (minPrice) {
-            query += whereClauseAdded ? ' AND ' : ' WHERE ';
-            query += `price >= $${paramIndex}`;
+            havingClause += havingClause ? ' AND ' : ' WHERE ';
+            havingClause += `price >= $${paramIndex}`;
             values.push(parseFloat(minPrice));
             paramIndex++;
-            whereClauseAdded = true;
         }
         
         if (maxPrice) {
-            query += whereClauseAdded ? ' AND ' : ' WHERE ';
-            query += `price <= $${paramIndex}`;
+            havingClause += havingClause ? ' AND ' : ' WHERE ';
+            havingClause += `price <= $${paramIndex}`;
             values.push(parseFloat(maxPrice));
             paramIndex++;
-            whereClauseAdded = true;
         }
         
         if (minQuantity) {
-            query += whereClauseAdded ? ' AND ' : ' WHERE ';
-            query += `quantity >= $${paramIndex}`;
+            havingClause += havingClause ? ' AND ' : ' WHERE ';
+            havingClause += `quantity >= $${paramIndex}`;
             values.push(parseInt(minQuantity));
             paramIndex++;
-            whereClauseAdded = true;
         }
         
         if (maxQuantity) {
-            query += whereClauseAdded ? ' AND ' : ' WHERE ';
-            query += `quantity <= $${paramIndex}`;
+            havingClause += havingClause ? ' AND ' : ' WHERE ';
+            havingClause += `quantity <= $${paramIndex}`;
             values.push(parseInt(maxQuantity));
             paramIndex++;
-            whereClauseAdded = true;
         }
         
         if (date) {
-            query += whereClauseAdded ? ' AND ' : ' WHERE ';
-            query += `timestamp::date = $${paramIndex}`;
+            havingClause += havingClause ? ' AND ' : ' WHERE ';
+            havingClause += `timestamp::date = $${paramIndex}`;
             values.push(date);
             paramIndex++;
-            whereClauseAdded = true;
         }
         
-        // Completar la query con ORDER BY, LIMIT y OFFSET
-        query += ` ORDER BY symbol, timestamp DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+        // Envolver en subquery para aplicar filtros, ordenar y paginar
+        const finalQuery = `
+            SELECT * FROM (${query}) combined_stocks
+            ${havingClause}
+            ORDER BY timestamp DESC 
+            LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
+        `;
         values.push(count, offset);
 
-        const result = await client.query(query, values);
-        res.json({ status: "success", data: result.rows });
+        const result = await client.query(finalQuery, values);
+
+        // Formatear respuesta para incluir información de descuentos en acciones de reventa
+        const formattedStocks = result.rows.map(stock => ({
+            ...stock,
+            is_resale: stock.stock_type === 'resale',
+            discount_info: stock.stock_type === 'resale' ? {
+                discount_percentage: stock.discount_percentage,
+                original_price: stock.original_price,
+                savings: (stock.original_price - stock.price).toFixed(2)
+            } : null
+        }));
+        res.json({ status: "success", data: formattedStocks });
     } catch (error) {
         console.error("Error fetching stocks:", error);
         res.status(500).json({ error: "Error fetching stocks" });
@@ -478,32 +503,72 @@ app.get('/stocks/:symbol', async (req, res) => {
     const { price, quantity, date } = req.query;
 
     try {
+        // Unir stocks originales con reventas para el símbolo específico
         let query = `
-            SELECT * FROM stocks
-            WHERE symbol = $1
+            SELECT 
+                symbol, price, long_name, quantity, timestamp,
+                'original' as stock_type, null as discount_percentage, null as original_price
+            FROM stocks
+            WHERE symbol = $1 AND quantity > 0
+            
+            UNION ALL
+            
+            SELECT 
+                symbol, resale_price as price, long_name, available_quantity as quantity, 
+                created_at as timestamp, 'resale' as stock_type, 
+                discount_percentage, original_price
+            FROM resale_stocks
+            WHERE symbol = $1 AND available_quantity > 0
         `;
+        
         const values = [symbol];
         let index = 2;
 
         if (price) {
-            query += ` AND price <= $${index}`;
+            // Envolver en subquery para aplicar filtros después del UNION
+            const baseQuery = query;
+            query = `
+                SELECT * FROM (${baseQuery}) combined_stocks
+                WHERE price <= $${index}
+            `;
             values.push(parseFloat(price));
             index++;
         }
 
         if (quantity) {
-            query += ` AND quantity <= $${index}`;
+            if (!query.includes('WHERE')) {
+                const baseQuery = query;
+                query = `
+                    SELECT * FROM (${baseQuery}) combined_stocks
+                    WHERE quantity <= $${index}
+                `;
+            } else {
+                query += ` AND quantity <= $${index}`;
+            }
             values.push(parseInt(quantity));
             index++;
         }
 
         if (date) {
-            query += ` AND timestamp::date = $${index}`;
+            if (!query.includes('WHERE')) {
+                const baseQuery = query;
+                query = `
+                    SELECT * FROM (${baseQuery}) combined_stocks
+                    WHERE timestamp::date = $${index}
+                `;
+            } else {
+                query += ` AND timestamp::date = $${index}`;
+            }
             values.push(date);
             index++;
         }
 
-        query += ` ORDER BY timestamp DESC;`;
+        // Si se aplicaron filtros, necesitamos ordenar después
+        if (index > 2) {
+            query += ` ORDER BY timestamp DESC`;
+        } else {
+            query += ` ORDER BY timestamp DESC`;
+        }
 
         const result = await client.query(query, values);
 
@@ -515,12 +580,26 @@ app.get('/stocks/:symbol', async (req, res) => {
             });
         }
 
-        res.json({ status: "success", data: result.rows });
+        // Formatear respuesta incluyendo información de reventa
+        const formattedStocks = result.rows.map(stock => ({
+            ...stock,
+            isResale: stock.stock_type === 'resale',
+            originalPrice: stock.stock_type === 'resale' ? stock.original_price : null,
+            discountPercentage: stock.stock_type === 'resale' ? stock.discount_percentage : null,
+            discount_info: stock.stock_type === 'resale' ? {
+                discount_percentage: stock.discount_percentage,
+                original_price: stock.original_price,
+                savings: (stock.original_price - stock.price).toFixed(2)
+            } : null
+        }));
+
+        res.json({ status: "success", data: formattedStocks });
     } catch (error) {
         console.error("Error fetching stock details:", error);
         res.status(500).json({ error: "Error fetching stock details" });
     }
 });
+
 
 // Endpoints de perfil y registro existentes
 // ...existing code...
@@ -656,7 +735,7 @@ app.get('/wallet/balance', checkJwt, syncUser, async (req, res) => {
 
 // Comprar acciones (versión mejorada)
 // Comprar acciones (versión corregida para WebPay)
-app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
+app.post('/stocks/buy', checkJwt, syncUser, requireAdmin, async (req, res) => {
     try {
         const { symbol, quantity } = req.body;
         
@@ -1358,6 +1437,114 @@ app.get('/purchase/:requestId/estimation', checkJwt, syncUser, async (req, res) 
 });
 app.listen(port, '0.0.0.0',() => {
     console.log(`Servidor ejecutándose en http://localhost:${port}`);
+});
+
+// Endpoint para crear reventa de acciones (solo administradores)
+app.post('/admin/stocks/resale', checkJwt, syncUser, requireAdmin, async (req, res) => {
+    try {
+        const { purchase_id, quantity, discount_percentage } = req.body;
+        
+        // Validaciones
+        if (!purchase_id || !quantity || quantity <= 0) {
+            return res.status(400).json({ error: "Datos de reventa inválidos" });
+        }
+        
+        if (!discount_percentage || discount_percentage < 0 || discount_percentage > 10) {
+            return res.status(400).json({ 
+                error: "El descuento debe estar entre 0% y 10%" 
+            });
+        }
+        
+        // Verificar que la compra existe y pertenece al admin
+        const purchaseQuery = `
+            SELECT pr.*, s.long_name 
+            FROM purchase_requests pr
+            LEFT JOIN stocks s ON pr.symbol = s.symbol
+            WHERE pr.id = $1 AND pr.user_id = $2 AND pr.status = 'ACCEPTED'
+            ORDER BY s.timestamp DESC
+            LIMIT 1
+        `;
+        
+        const purchaseResult = await client.query(purchaseQuery, [purchase_id, req.userId]);
+        
+        if (purchaseResult.rows.length === 0) {
+            return res.status(404).json({ 
+                error: "Compra no encontrada o no autorizada" 
+            });
+        }
+        
+        const purchase = purchaseResult.rows[0];
+        
+        // Verificar si ya hay una reventa para esta compra
+        const existingResaleQuery = `
+            SELECT available_quantity 
+            FROM resale_stocks 
+            WHERE original_purchase_id = $1
+        `;
+        
+        const existingResale = await client.query(existingResaleQuery, [purchase_id]);
+        const alreadyForSale = existingResale.rows[0]?.available_quantity || 0;
+        
+        if (alreadyForSale + quantity > purchase.quantity) {
+            return res.status(400).json({ 
+                error: `Solo puedes revender ${purchase.quantity - alreadyForSale} acciones más de esta compra` 
+            });
+        }
+        
+        // Calcular precio de reventa
+        const originalPrice = parseFloat(purchase.price);
+        const discountAmount = originalPrice * (discount_percentage / 100);
+        const resalePrice = originalPrice - discountAmount;
+        
+        // Crear o actualizar la reventa
+        if (existingResale.rows.length > 0) {
+            // Actualizar cantidad disponible
+            await client.query(`
+                UPDATE resale_stocks 
+                SET available_quantity = available_quantity + $1,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE original_purchase_id = $2
+            `, [quantity, purchase_id]);
+        } else {
+            // Crear nueva reventa
+            await client.query(`
+                INSERT INTO resale_stocks 
+                (original_purchase_id, admin_user_id, symbol, quantity, original_price, 
+                 discount_percentage, resale_price, long_name, available_quantity)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            `, [
+                purchase_id, req.userId, purchase.symbol, quantity, originalPrice,
+                discount_percentage, resalePrice, purchase.long_name, quantity
+            ]);
+        }
+        
+        console.log(`Reventa creada: ${quantity} acciones de ${purchase.symbol} con ${discount_percentage}% descuento`);
+        
+        // Registrar evento
+        await logEvent('ADMIN_RESALE', {
+            purchase_id: purchase_id,
+            admin_id: req.userId,
+            symbol: purchase.symbol,
+            quantity: quantity,
+            original_price: originalPrice,
+            discount_percentage: discount_percentage,
+            resale_price: resalePrice
+        });
+        
+        res.json({
+            message: "Reventa creada exitosamente",
+            symbol: purchase.symbol,
+            quantity: quantity,
+            original_price: originalPrice,
+            discount_percentage: discount_percentage,
+            resale_price: resalePrice,
+            savings: discountAmount.toFixed(2)
+        });
+        
+    } catch (error) {
+        console.error("Error creando reventa:", error);
+        res.status(500).json({ error: "Error interno del servidor" });
+    }
 });
 /* HARDCODEADO PARA QUE COMPRAS DE ADMIN SEAN DISTINTAS. PROBABLEMENTE HAY QUE CAMBIARLO/BORRARLO
 // Endpoint para compras administrativas

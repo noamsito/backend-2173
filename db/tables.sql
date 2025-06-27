@@ -84,6 +84,22 @@ CREATE TABLE IF NOT EXISTS webpay_transactions (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Tabla para reventa de stocks
+CREATE TABLE IF NOT EXISTS resale_stocks (
+    id SERIAL PRIMARY KEY,
+    original_purchase_id INTEGER REFERENCES purchase_requests(id),
+    admin_user_id INTEGER REFERENCES users(id),
+    symbol VARCHAR(10) NOT NULL,
+    quantity INTEGER NOT NULL,
+    original_price DECIMAL(10,2) NOT NULL,
+    discount_percentage DECIMAL(5,2) NOT NULL CHECK (discount_percentage >= 0 AND discount_percentage <= 10),
+    resale_price DECIMAL(10,2) NOT NULL,
+    long_name VARCHAR(255),
+    available_quantity INTEGER NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- AGREGAR AL FINAL: Columna status a purchases también (para compatibilidad con Sequelize)
 ALTER TABLE purchases ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'PENDING';
 
