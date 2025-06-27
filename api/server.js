@@ -12,6 +12,7 @@ import sequelize from './db/db.js';
 import { TransbankService } from './src/services/webpayService.js';
 import webpayRoutes from './src/routes/webpayRoutes.js';
 import { isAdmin, requireAdmin } from './auth-integration.js';
+import adminRoutes from './src/routes/adminRoutes.js';
 
 const Pool = pg.Pool;
 const app = express();
@@ -104,6 +105,12 @@ app.use('/api/purchases', (req, res, next) => {
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use('/api/purchases', purchaseRoutes);
+
+// 🏛️ RUTAS DE SUBASTAS E INTERCAMBIOS (Solo para administradores)
+app.use('/admin', checkJwt, syncUser, (req, res, next) => {
+    req.app.locals.pool = pool;
+    next();
+}, adminRoutes);
 
 
 const client = await pool.connect();
