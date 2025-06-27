@@ -66,6 +66,22 @@ function extractAuth0IdFromToken(token) {
   }
 }
 
+// Función para verificar si es admin
+export function isAdmin(req) {
+  const roles = req.auth?.payload?.['https://stockmarket-app/roles'] || [];
+  return roles.includes('admin') || roles.includes('administrator');
+}
+
+// Middleware para verificar permisos de administrador
+export function requireAdmin(req, res, next) {
+  if (!isAdmin(req)) {
+    return res.status(403).json({ 
+      error: "Acceso denegado. Se requieren permisos de administrador." 
+    });
+  }
+  next();
+}
+
 /**
  * Middleware para sincronizar usuarios de Auth0 con la base de datos local
  * @param {Object} pool - Pool de conexión a PostgreSQL
@@ -79,6 +95,9 @@ export function createSyncUserMiddleware(pool) {
       
       // Extraer ID de Auth0 del token JWT
       let auth0Id = req.auth?.payload?.sub || req.auth?.sub;
+
+      const roles = req.auth?.payload?.['https://stockmarket-app/roles'] || [];
+      const isUserAdmin = roles.includes('admin') || roles.includes('administrator');
       
       // Si no tenemos auth0Id desde req.auth, intentamos extraerlo manualmente del token
       if (!auth0Id && req.headers.authorization) {
@@ -154,13 +173,13 @@ export function createSyncUserMiddleware(pool) {
           await client.query('BEGIN');
           
           const insertQuery = `
-            INSERT INTO users (auth0_id, email, name, last_login)
-            VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+            INSERT INTO users (auth0_id, email, name, last_login, is_admin)
+            VALUES ($1, $2, $3, CURRENT_TIMESTAMP, $4)
             RETURNING id
           `;
           
           const insertResult = await client.query(insertQuery, [
-            auth0Id, userEmail, userName || "Usuario"
+            auth0Id, userEmail, userName || "Usuario", isUserAdmin
           ]);
           
           req.userId = insertResult.rows[0].id;
@@ -179,12 +198,15 @@ export function createSyncUserMiddleware(pool) {
           // Usuario ya existe
           req.userId = checkResult.rows[0].id;
           
-          // Actualizar último login
+          // Actualizar último login y rol si es necesario
           await client.query(
-            `UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = $1`,
-            [req.userId]
+            `UPDATE users SET last_login = CURRENT_TIMESTAMP, is_admin = $2 WHERE id = $1`,
+            [req.userId, isUserAdmin]
           );
         }
+
+        // Agregar información de admin al request
+        req.isAdmin = isUserAdmin;
         
         next();
       } catch (error) {

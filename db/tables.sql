@@ -127,3 +127,9 @@ ON purchase_requests(estimation_job_id);
 
 -- Comentario para tracking
 COMMENT ON COLUMN purchase_requests.estimation_job_id IS 'ID del job de estimación en el sistema de workers';
+
+-- Agregar columna a users para identificar administradores
+ALTER TABLE users ADD COLUMN is_admin BOOLEAN DEFAULT FALSE;
+
+-- Agregar columna para identificar compras administrativas
+-- ALTER TABLE purchase_requests ADD COLUMN is_admin_purchase BOOLEAN DEFAULT FALSE;

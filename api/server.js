@@ -11,6 +11,7 @@ import axios from 'axios';
 import sequelize from './db/db.js';
 import { TransbankService } from './src/services/webpayService.js';
 import webpayRoutes from './src/routes/webpayRoutes.js';
+import { isAdmin, requireAdmin } from './auth-integration.js';
 
 const Pool = pg.Pool;
 const app = express();
@@ -1329,4 +1330,160 @@ app.get('/purchase/:requestId/estimation', checkJwt, syncUser, async (req, res) 
 });
 app.listen(port, '0.0.0.0',() => {
     console.log(`Servidor ejecutándose en http://localhost:${port}`);
+});
+/* HARDCODEADO PARA QUE COMPRAS DE ADMIN SEAN DISTINTAS. PROBABLEMENTE HAY QUE CAMBIARLO/BORRARLO
+// Endpoint para compras administrativas
+app.post('/admin/stocks/buy', checkJwt, syncUser, requireAdmin, async (req, res) => {
+    try {
+        const { symbol, quantity } = req.body;
+        
+        if (!symbol || !quantity || quantity <= 0) {
+            return res.status(400).json({ error: "Solicitud de compra inválida" });
+        }
+        
+        console.log(`Procesando compra administrativa: ${quantity} acciones de ${symbol}`);
+        
+        // Obtener precio actual y disponibilidad de la acción
+        const stockQuery = `
+            SELECT * FROM stocks 
+            WHERE symbol = $1 
+            ORDER BY timestamp DESC 
+            LIMIT 1
+        `;
+        
+        const stockResult = await client.query(stockQuery, [symbol]);
+        
+        if (stockResult.rows.length === 0) {
+            return res.status(404).json({ error: "Acción no encontrada" });
+        }
+        
+        const stock = stockResult.rows[0];
+        
+        if (stock.quantity < quantity) {
+            return res.status(400).json({ error: "No hay suficientes acciones disponibles" });
+        }
+        
+        const totalCost = stock.price * quantity;
+        const requestId = uuidv4();
+        
+        // Para administradores: procesar directamente sin WebPay
+        // 1. Actualizar inventario de acciones
+        await client.query(`
+            UPDATE stocks 
+            SET quantity = quantity - $1 
+            WHERE id = $2
+        `, [quantity, stock.id]);
+        
+        // 2. Crear registro de compra administrativa
+        const purchaseQuery = `
+            INSERT INTO purchase_requests 
+            (request_id, user_id, symbol, quantity, price, status, is_admin_purchase) 
+            VALUES ($1, $2, $3, $4, $5, 'ACCEPTED', TRUE)
+            RETURNING id
+        `;
+        
+        await client.query(purchaseQuery, [
+            requestId, 
+            req.userId,
+            symbol, 
+            quantity, 
+            stock.price
+        ]);
+        
+        // 3. Enviar solicitud por MQTT al canal stocks/requests
+        await sendStockRequest(symbol, quantity, stock.price, requestId);
+        
+        // 4. Registrar evento
+        await logEvent('ADMIN_PURCHASE', {
+            request_id: requestId,
+            user_id: req.userId,
+            symbol: symbol,
+            quantity: quantity,
+            price: stock.price,
+            group_id: GROUP_ID,
+            stock_origin: GROUP_ID // Cambiar por número de grupo
+        });
+        
+        res.json({
+            message: "Compra administrativa procesada exitosamente",
+            request_id: requestId,
+            symbol: symbol,
+            quantity: quantity,
+            total_cost: totalCost
+        });
+        
+    } catch (error) {
+        console.error("Error procesando compra administrativa:", error);
+        res.status(500).json({ error: "Error interno del servidor" });
+    }
+});
+
+// Función para enviar solicitud MQTT
+async function sendStockRequest(symbol, quantity, price, requestId) {
+    try {
+        const message = {
+            request_id: requestId,
+            symbol: symbol,
+            quantity: quantity,
+            price: price,
+            stock_origin: GROUP_ID, // Tu número de grupo
+            timestamp: new Date().toISOString()
+        };
+        
+        // Aquí implementarías el envío MQTT al canal stocks/requests
+        // Ejemplo usando mqtt client:
+        /*
+        const mqtt = require('mqtt');
+        const client = mqtt.connect(process.env.MQTT_BROKER_URL);
+        
+        client.publish('stocks/requests', JSON.stringify(message), (err) => {
+            if (err) {
+                console.error('Error enviando mensaje MQTT:', err);
+            } else {
+                console.log('Solicitud enviada por MQTT:', message);
+            }
+        });
+        */
+       /*
+        
+        console.log('Mensaje a enviar por MQTT:', message);
+    } catch (error) {
+        console.error('Error enviando solicitud MQTT:', error);
+    }
+}
+
+*/
+
+// Endpoint para obtener información del usuario actual
+app.get('/user/profile', checkJwt, syncUser, async (req, res) => {
+    try {
+        const client = await pool.connect();
+        
+        const userQuery = `
+            SELECT id, email, name, is_admin, last_login 
+            FROM users 
+            WHERE id = $1
+        `;
+        
+        const result = await client.query(userQuery, [req.userId]);
+        client.release();
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: "Usuario no encontrado" });
+        }
+        
+        const user = result.rows[0];
+        
+        res.json({
+            id: user.id,
+            email: user.email,
+            name: user.name,
+            isAdmin: user.is_admin || req.isAdmin, // Doble verificación
+            lastLogin: user.last_login
+        });
+        
+    } catch (error) {
+        console.error('Error obteniendo perfil:', error);
+        res.status(500).json({ error: 'Error obteniendo información del usuario' });
+    }
 });
