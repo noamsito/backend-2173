@@ -9,14 +9,14 @@ export const requireAdmin = async (req, res, next) => {
     const pool = req.app.locals.pool;
     
     // Verificar si el usuario tiene rol de admin
-    const userQuery = `SELECT role FROM users WHERE id = $1`;
+    const userQuery = `SELECT is_admin FROM users WHERE id = $1`;
     const result = await pool.query(userQuery, [req.userId]);
     
     if (result.rows.length === 0) {
       return res.status(404).json({ error: "Usuario no encontrado" });
     }
     
-    if (result.rows[0].role !== 'admin') {
+    if (!result.rows[0].is_admin) {
       return res.status(403).json({ 
         error: "Acceso denegado. Se requieren privilegios de administrador." 
       });
@@ -190,9 +190,9 @@ export const promoteToAdmin = async (req, res) => {
     
     const updateQuery = `
       UPDATE users 
-      SET role = 'admin', updated_at = CURRENT_TIMESTAMP
+      SET is_admin = true, updated_at = CURRENT_TIMESTAMP
       WHERE id = $1
-      RETURNING id, email, name, role
+      RETURNING id, email, name, is_admin
     `;
     
     const result = await pool.query(updateQuery, [userId]);

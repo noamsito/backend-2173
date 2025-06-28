@@ -75,10 +75,10 @@ const pool = new Pool({
 const syncUser = createSyncUserMiddleware(pool);
 const GROUP_ID = process.env.GROUP_ID || "1";
 
-// CORREGIR: Configurar middleware de autenticación Auth0 con las variables correctas
+// CORREGIDO: Configurar middleware de autenticación Auth0 con las variables correctas
 const checkJwt = auth({
     audience: process.env.AUTH0_AUDIENCE || 'https://stockmarket-api/',
-    issuerBaseURL: `https://${process.env.AUTH0_DOMAIN}` || 'https://dev-ouxdigl1l6bn6n3r.us.auth0.com/',
+    issuerBaseURL: `https://${process.env.AUTH0_DOMAIN || 'dev-ouxdigl1l6bn6n3r.us.auth0.com'}`,
     tokenSigningAlg: 'RS256'
 });
 
@@ -1140,6 +1140,23 @@ app.get('/check-request', async (req, res) => {
 // Agregar este endpoint de depuración después de los demás endpoints
 
 // Endpoint de depuración de token JWT
+// ENDPOINT DE DEBUG PARA AUTH0
+app.get('/debug/auth', (req, res) => {
+    const authHeader = req.headers.authorization;
+    console.log('🔍 DEBUG Auth Header:', authHeader);
+    console.log('🔍 DEBUG Headers completos:', JSON.stringify(req.headers, null, 2));
+    
+    res.json({
+        authHeader: authHeader,
+        hasAuth: !!authHeader,
+        config: {
+            domain: process.env.AUTH0_DOMAIN,
+            audience: process.env.AUTH0_AUDIENCE,
+            issuerURL: `https://${process.env.AUTH0_DOMAIN || 'dev-ouxdigl1l6bn6n3r.us.auth0.com'}`
+        }
+    });
+});
+
 app.get('/debug/token', checkJwt, async (req, res) => {
     try {
         // 1. Extraer el token del encabezado

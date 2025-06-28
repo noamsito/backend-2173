@@ -1,4 +1,3 @@
-
 {
   "name": "e0-noamsito",
   "version": "1.0.0",
@@ -31,7 +30,7 @@
     "node-fetch": "^3.3.2",
     "pg": "^8.16.0",
     "sequelize": "^6.37.7",
-    "transbank-sdk": "^6.0.0",
+    "transbank-sdk": "^6.1.0",
     "uuid": "^11.1.0"
   },
   "devDependencies": {

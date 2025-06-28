@@ -766,7 +766,7 @@ async function logEvent(type, details, pool) {
 }
 
 // Función para obtener el historial de intercambios
-const getExchangeHistory = async (req, res) => {
+export const getExchangeHistory = async (req, res) => {
     try {
         if (!global.exchangeHistory) {
             global.exchangeHistory = [];
@@ -996,44 +996,73 @@ const executeExchange = async (req, res) => {
 };
 
 // Función para obtener el inventario real de acciones del usuario
-const getMyStocks = async (req, res) => {
+export const getMyStocks = async (req, res) => {
     try {
         const pool = req.app.locals.pool;
         if (!pool) {
+            console.error('❌ Pool de base de datos no disponible');
             return res.status(500).json({ error: 'Base de datos no disponible' });
         }
 
-        const userId = 1; // Usuario de prueba en modo bypass
+        // Usar el userId del token de autenticación o fallback a 1 para pruebas
+        const userId = req.userId || 1;
         
         console.log(`📊 Calculando inventario real de acciones para usuario ${userId}`);
+        console.log(`🔍 DEBUG: req.userId = ${req.userId}, userId final = ${userId}`);
         
         // Consulta que suma/resta todas las transacciones por símbolo
+        // COMBINA purchases (compras directas) y purchase_requests (compras aprobadas)
         const query = `
+            WITH all_user_stocks AS (
+                -- Compras directas completadas
+                SELECT symbol, quantity, created_at, 'direct_purchase' as source
+                FROM purchases 
+                WHERE user_id = $1
+                
+                UNION ALL
+                
+                -- Compras aprobadas (purchase_requests con status ACCEPTED)
+                SELECT symbol, quantity, created_at, 'approved_request' as source
+                FROM purchase_requests 
+                WHERE user_id = $1 AND status = 'ACCEPTED'
+            )
             SELECT 
                 symbol,
                 SUM(quantity) as total_quantity,
                 COUNT(*) as transaction_count,
-                MAX(created_at) as last_transaction
-            FROM purchases 
-            WHERE user_id = $1 
+                MAX(created_at) as last_transaction,
+                STRING_AGG(DISTINCT source, ', ') as sources
+            FROM all_user_stocks
             GROUP BY symbol
             HAVING SUM(quantity) > 0
             ORDER BY symbol ASC
         `;
         
+        console.log(`🔍 Ejecutando consulta SQL para userId: ${userId}`);
         const result = await pool.query(query, [userId]);
+        console.log(`✅ Consulta SQL ejecutada exitosamente. Filas encontradas: ${result.rows.length}`);
+        
+        // Debug adicional: verificar ambas tablas
+        const debugQuery1 = `SELECT * FROM purchases WHERE user_id = $1 ORDER BY created_at DESC LIMIT 5`;
+        const debugResult1 = await pool.query(debugQuery1, [userId]);
+        console.log(`🔍 DEBUG: Últimas 5 entradas en PURCHASES para usuario ${userId}:`, debugResult1.rows);
+        
+        const debugQuery2 = `SELECT * FROM purchase_requests WHERE user_id = $1 ORDER BY created_at DESC LIMIT 5`;
+        const debugResult2 = await pool.query(debugQuery2, [userId]);
+        console.log(`🔍 DEBUG: Últimas 5 entradas en PURCHASE_REQUESTS para usuario ${userId}:`, debugResult2.rows);
         
         // Formatear los datos para el frontend
         const stocks = result.rows.map(row => ({
             symbol: row.symbol,
             quantity: parseInt(row.total_quantity),
             transactions: parseInt(row.transaction_count),
-            lastTransaction: row.last_transaction
+            lastTransaction: row.last_transaction,
+            sources: row.sources // Indica si vienen de purchases, purchase_requests, o ambos
         }));
         
         console.log(`📦 Inventario calculado: ${stocks.length} símbolos diferentes`);
         stocks.forEach(stock => {
-            console.log(`  ${stock.symbol}: ${stock.quantity} acciones`);
+            console.log(`  ${stock.symbol}: ${stock.quantity} acciones (fuentes: ${stock.sources})`);
         });
         
         res.json({
@@ -1141,9 +1170,7 @@ export {
     createProposal,
     respondToProposal,
     saveExternalOffer,
-    getExchangeHistory,
     checkMyProposal,
     executeExchange,
-    getMyStocks,
     handleMyProposalRejected
 }; 
