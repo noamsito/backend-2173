@@ -1,7 +1,7 @@
 // src/routes/adminRoutes.js
 import express from 'express';
 import { buyStocksForGroup, getGroupStocks, promoteToAdmin, requireAdmin } from '../controllers/adminController.js';
-import { createAuction, getExternalOffers, createProposal, respondToProposal, saveExternalOffer, getExchangeHistory, checkMyProposal, executeExchange, getMyStocks, handleMyProposalRejected } from '../controllers/auctionController.js';
+import { createAuction, getExternalOffers, createProposal, respondToProposal, saveExternalOffer, getExchangeHistory, checkMyProposal, executeExchange, handleMyProposalRejected } from '../controllers/auctionController.js';
 
 const router = express.Router();
 
@@ -41,7 +41,6 @@ router.post('/execute-exchange', executeExchange);
 // Ruta para manejar rechazo de mis propuestas (devolver acciones reservadas, usada por MQTT client)
 router.post('/handle-proposal-rejected', handleMyProposalRejected);
 
-// Ruta para obtener el inventario real de acciones del usuario (Solo administradores)
-router.get('/my-stocks', requireAdmin, getMyStocks);
+// MOVIDO: my-stocks ya no es solo para admin, se movió a server.js
 
 export default router; 

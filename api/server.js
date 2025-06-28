@@ -13,6 +13,7 @@ import { TransbankService } from './src/services/webpayService.js';
 import webpayRoutes from './src/routes/webpayRoutes.js';
 import { isAdmin, requireAdmin } from './auth-integration.js';
 import adminRoutes from './src/routes/adminRoutes.js';
+import { getMyStocks, saveExternalOffer, checkMyProposal, executeExchange, handleMyProposalRejected } from './src/controllers/auctionController.js';
 
 const Pool = pg.Pool;
 const app = express();
@@ -847,6 +848,19 @@ app.get('/purchases', checkJwt, syncUser, async (req, res) => {
     }
 });
 
+// ========================================
+// NUEVA RUTA: Mis Acciones (para todos los usuarios autenticados)
+// ========================================
+app.get('/my-stocks', checkJwt, syncUser, async (req, res) => {
+    try {
+        req.app.locals.pool = pool; // Asegurar que pool esté disponible
+        await getMyStocks(req, res);
+    } catch (error) {
+        console.error("Error en /my-stocks:", error);
+        res.status(500).json({ error: "Error interno del servidor" });
+    }
+});
+
 // Añade esta ruta de depuración para verificar duplicados
 app.get('/debug/check-duplicates', async (req, res) => {
     try {
@@ -1024,6 +1038,56 @@ app.post('/external-purchase', async (req, res) => {
         res.json({ status: "success" });
     } catch (error) {
         console.error("Error procesando compra externa:", error);
+        res.status(500).json({ error: "Error interno del servidor" });
+    }
+});
+
+
+// ========================================
+// RUTAS PÚBLICAS PARA MQTT CLIENT (sin autenticación Auth0)
+// ========================================
+
+// Ruta pública para guardar ofertas externas (usada por MQTT client)
+app.post('/mqtt/external-offers', async (req, res) => {
+    try {
+        // Asegurar que pool esté disponible
+        req.app.locals.pool = pool;
+        await saveExternalOffer(req, res);
+    } catch (error) {
+        console.error("Error en ruta MQTT external-offers:", error);
+        res.status(500).json({ error: "Error interno del servidor" });
+    }
+});
+
+// Ruta pública para verificar propuestas (usada por MQTT client)
+app.post('/mqtt/check-my-proposal', async (req, res) => {
+    try {
+        req.app.locals.pool = pool;
+        await checkMyProposal(req, res);
+    } catch (error) {
+        console.error("Error en ruta MQTT check-my-proposal:", error);
+        res.status(500).json({ error: "Error interno del servidor" });
+    }
+});
+
+// Ruta pública para ejecutar intercambios (usada por MQTT client)
+app.post('/mqtt/execute-exchange', async (req, res) => {
+    try {
+        req.app.locals.pool = pool;
+        await executeExchange(req, res);
+    } catch (error) {
+        console.error("Error en ruta MQTT execute-exchange:", error);
+        res.status(500).json({ error: "Error interno del servidor" });
+    }
+});
+
+// Ruta pública para manejar rechazos (usada por MQTT client)
+app.post('/mqtt/handle-proposal-rejected', async (req, res) => {
+    try {
+        req.app.locals.pool = pool;
+        await handleMyProposalRejected(req, res);
+    } catch (error) {
+        console.error("Error en ruta MQTT handle-proposal-rejected:", error);
         res.status(500).json({ error: "Error interno del servidor" });
     }
 });

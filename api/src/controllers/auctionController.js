@@ -239,7 +239,7 @@ const respondToProposal = async (req, res) => {
             });
         }
 
-        // ✨ NUEVO: Verificar si ya se respondió a esta propuesta buscando en el store
+        // ✨ NUEVO: Verificar si ya se respondió a esta propuesta buscando en el store (IGUAL QUE MAIN)
         const responseKey = `${auction_id}-${proposal_id}`;
         const alreadyResponded = externalOffersStore.some(offer => 
             offer.auction_id === auction_id && 
@@ -286,7 +286,7 @@ const respondToProposal = async (req, res) => {
             console.error('❌ Error conectando con cliente MQTT:', mqttError);
         }
 
-        // ✨ NUEVO: Guardar la respuesta en el store para que no se pueda responder múltiples veces
+        // ✨ NUEVO: Guardar la respuesta en el store para que no se pueda responder múltiples veces (IGUAL QUE MAIN)
         const responseOffer = {
             auction_id,
             proposal_id,
@@ -426,7 +426,7 @@ const saveExternalOffer = async (req, res) => {
     }
 };
 
-// Función para obtener ofertas externas reales
+// Función para obtener ofertas externas reales (IGUAL QUE MAIN: usa externalOffersStore)
 export const getExternalOffers = async (req, res) => {
     try {
         // NUEVA LÓGICA: Marcar ofertas completadas y propuestas ya respondidas
@@ -481,14 +481,14 @@ export const getExternalOffers = async (req, res) => {
             status: 'success',
             offers: sortedOffers,
             count: sortedOffers.length
-    });
+        });
     
-  } catch (error) {
+    } catch (error) {
         console.error('Error al obtener ofertas externas:', error);
         res.status(500).json({ 
             error: 'Error interno del servidor' 
         });
-  }
+    }
 };
 
 // Obtener subastas activas
