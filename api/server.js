@@ -86,12 +86,16 @@ app.use('/webpay', webpayRoutes);
 
 // CORS configuration
 app.use(cors({
-    origin: ['http://localhost:80', 'http://localhost', 'http://localhost:5173', 
-        process.env.FRONTEND_URL, 'http://antonioescobar.lat',
-        'http://frontend-grupo1-iic2173.s3-website-us-east-1.amazonaws.com/',
-        'http://frontend-grupo1-iic2173.s3-website-us-east-1.amazonaws.com'].filter(Boolean),
+    origin: [
+        'http://localhost:80', 
+        'http://localhost', 
+        'http://localhost:5173', 
+        'http://frontend-grupo1-iic2173.s3-website-us-east-1.amazonaws.com', // ✅ Tu S3
+        process.env.FRONTEND_URL, 
+        'http://antonioescobar.lat'
+    ].filter(Boolean),
     credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
     allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
