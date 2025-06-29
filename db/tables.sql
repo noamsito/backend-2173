@@ -147,5 +147,9 @@ COMMENT ON COLUMN purchase_requests.estimation_job_id IS 'ID del job de estimaci
 -- Agregar columna a users para identificar administradores
 ALTER TABLE users ADD COLUMN is_admin BOOLEAN DEFAULT FALSE;
 
--- Agregar columna para identificar compras administrativas
--- ALTER TABLE purchase_requests ADD COLUMN is_admin_purchase BOOLEAN DEFAULT FALSE;
+-- Agregar columna para identificar reventas en purchase_requests
+ALTER TABLE purchase_requests ADD COLUMN is_resale BOOLEAN DEFAULT FALSE;
+
+ALTER TABLE purchase_requests ADD COLUMN IF NOT EXISTS is_resale BOOLEAN DEFAULT FALSE;
+ALTER TABLE purchase_requests ADD COLUMN IF NOT EXISTS reason TEXT;
+ALTER TABLE purchase_requests ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;

@@ -264,29 +264,61 @@ export class WebpayController {
   static async processSuccessfulPurchase(client, transaction) {
     try {
       const { user_id, symbol, quantity, request_id, amount } = transaction;
+
+      const isResale = symbol.endsWith('_r');
       
-      const mqttMessage = {
-        request_id: request_id,
-        group_id: process.env.GROUP_ID || "1",
-        quantity: quantity,
-        symbol: symbol,
-        stock_origin: 0,
-        operation: "BUY",
-        deposit_token: transaction.token_ws
-      };
-      
-      try {
-        await axios.post('http://mqtt-client:3000/publish', {
-          topic: 'stocks/requests',
-          message: mqttMessage
-        });
+      if (!isResale) {
+        // ✅ SOLO COMPRAS ORIGINALES van por MQTT
+        console.log(`📡 Enviando compra ORIGINAL al broker MQTT: ${request_id}`);
         
-        console.log(`📡 Solicitud enviada al broker MQTT DESPUÉS de pago exitoso: ${request_id}`);
-      } catch (mqttError) {
-        console.error('❌ Error enviando al broker MQTT:', mqttError);
-        // Continuar con el proceso aunque falle el envío
+        const mqttMessage = {
+          request_id: request_id,
+          group_id: process.env.GROUP_ID || "1",
+          quantity: quantity,
+          symbol: symbol,
+          stock_origin: 0,
+          operation: "BUY",
+          deposit_token: transaction.token_ws
+        };
+        
+        try {
+          await axios.post('http://mqtt-client:3000/publish', {
+            topic: 'stocks/requests',
+            message: mqttMessage
+          });
+          
+          console.log(`📡 Solicitud ORIGINAL enviada al broker MQTT: ${request_id}`);
+        } catch (mqttError) {
+          console.error('❌ Error enviando al broker MQTT:', mqttError);
+          // Continuar con el proceso aunque falle el envío
+        }
+        
+        // ENVIAR VALIDACIÓN POR MQTT (según enunciado) - solo para originales
+        const validationMessage = {
+          request_id: request_id,
+          timestamp: new Date().toISOString(),
+          status: "ACCEPTED",
+          reason: "Pago procesado exitosamente via WebPay"
+        };
+        
+        try {
+          await axios.post('http://mqtt-client:3000/publish', {
+            topic: 'stocks/validation',
+            message: validationMessage
+          });
+          
+          console.log(`📡 Validación enviada por stocks/validation: ${request_id}`);
+        } catch (mqttError) {
+          console.error('❌ Error enviando validación al broker MQTT:', mqttError);
+        }
+        
+      } else {
+        // ✅ COMPRAS DE REVENTA - Procesamiento directo SIN MQTT
+        console.log(`🚫 Compra de REVENTA - NO enviando por MQTT, procesando directamente: ${request_id}`);
+        
+        // Procesar reventa directamente
+        await WebpayController.processResalePurchase(client, transaction);
       }
-      
       // 1. ACTUALIZAR SOLICITUD DE COMPRA (ya existe desde el flujo inicial)
       const updatePurchaseQuery = `
         UPDATE purchase_requests 
@@ -301,26 +333,6 @@ export class WebpayController {
       
       // 2. ✅ SIN DESCUENTO DE WALLET - El pago se procesó via WebPay
       console.log(`💰 Pago de $${amount} procesado exitosamente via WebPay (sin descuento de wallet)`);
-      
-      // 3. ENVIAR VALIDACIÓN POR MQTT (según enunciado)
-      const validationMessage = {
-        request_id: request_id,
-        timestamp: new Date().toISOString(),
-        status: "ACCEPTED",
-        reason: "Pago procesado exitosamente via WebPay"
-      };
-      
-      try {
-        await axios.post('http://mqtt-client:3000/publish', {
-          topic: 'stocks/validation',
-          message: validationMessage
-        });
-        
-        console.log(`📡 Validación enviada por stocks/validation: ${request_id}`);
-      } catch (mqttError) {
-        console.error('❌ Error enviando validación al broker MQTT:', mqttError);
-        // No fallar la compra por esto
-      }
 
       try {
         await client.query(`
@@ -345,6 +357,7 @@ export class WebpayController {
         price: amount / quantity,
         user_id: user_id,
         payment_method: 'webpay',
+        purchase_type: isResale ? 'resale' : 'original',
         timestamp: new Date().toISOString()
       };
       
@@ -377,6 +390,40 @@ export class WebpayController {
       return { success: false, error: error.message };
     }
   }
+
+  // ✅ NUEVO MÉTODO: Procesar compra de reventa directamente
+  static async processResalePurchase(client, transaction) {
+    try {
+      const { symbol, quantity, request_id } = transaction;
+      
+      console.log(`🔄 Procesando reventa directamente: ${symbol}`);
+      
+      // 1. Actualizar stock de reventa (reducir cantidad disponible)
+      await client.query(`
+        UPDATE stocks 
+        SET quantity = quantity - $1 
+        WHERE symbol = $2
+        AND id = (SELECT id FROM stocks WHERE symbol = $2 ORDER BY timestamp DESC LIMIT 1)
+      `, [quantity, symbol]);
+      
+      // 2. Crear registro en purchases (compra finalizada)
+      const originalSymbol = symbol.replace('_r', '');
+      await client.query(`
+        INSERT INTO purchases 
+        (request_id, user_id, symbol, quantity, price, status, created_at)
+        SELECT pr.request_id, pr.user_id, pr.symbol, pr.quantity, pr.price, 'COMPLETED', NOW()
+        FROM purchase_requests pr
+        WHERE pr.request_id = $1
+      `, [request_id]);
+      
+      console.log(`✅ Reventa procesada directamente: ${quantity} acciones de ${symbol}`);
+      
+    } catch (error) {
+      console.error('❌ Error procesando reventa:', error);
+      throw error;
+    }
+  }
+
 
   /*
   static async handleReturn(req, res) {
