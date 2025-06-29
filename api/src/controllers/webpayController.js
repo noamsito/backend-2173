@@ -178,6 +178,20 @@ export class WebpayController {
         // Verificar el estado del pago
         if (paymentData.status === 'AUTHORIZED' && paymentData.response_code === 0) {
           console.log(`✅ Pago autorizado: ${token_ws}`);
+          // ✅ OBTENER INFORMACIÓN DEL USUARIO ANTES DE GENERAR BOLETA
+          const userQuery = `
+              SELECT id, name, email 
+              FROM users 
+              WHERE id = $1
+          `;
+          
+          const userResult = await client.query(userQuery, [transaction.user_id]);
+          const user = userResult.rows[0];
+            
+          if (!user) {
+              console.error(`❌ Usuario no encontrado: ${transaction.user_id}`);
+              // Continuar sin boleta pero no fallar el pago
+          }
   
           // Procesar compra SIN WALLET
           const purchaseSuccess = await WebpayController.processSuccessfulPurchase(client, transaction);

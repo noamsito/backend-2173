@@ -35,6 +35,18 @@ const io = new Server(server, {
 
 
 dotenv.config();
+
+app.use(cors({
+    origin: ['http://localhost:80', 'http://localhost', 'http://localhost:5173', 
+        process.env.FRONTEND_URL, 'http://antonioescobar.lat',
+        'http://frontend-grupo1-iic2173.s3-website-us-east-1.amazonaws.com/',
+        'http://frontend-grupo1-iic2173.s3-website-us-east-1.amazonaws.com'].filter(Boolean),
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+    allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
+
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:80';
 
 const WORKERS_API_URL = process.env.WORKERS_API_URL || 'http://localhost:3000';
@@ -125,16 +137,6 @@ const handleAuthError = (error, req, res, next) => {
 // Webpay routes
 app.use('/webpay', webpayRoutes);
 
-// CORS configuration
-app.use(cors({
-    origin: ['http://localhost:80', 'http://localhost', 'http://localhost:5173', 
-        process.env.FRONTEND_URL, 'http://antonioescobar.lat',
-        'http://frontend-grupo1-iic2173.s3-website-us-east-1.amazonaws.com/',
-        'http://frontend-grupo1-iic2173.s3-website-us-east-1.amazonaws.com'].filter(Boolean),
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-    allowedHeaders: ['Content-Type', 'Authorization']
-}));
 
 // Middleware de debugging
 app.use('/api/purchases', (req, res, next) => {
