@@ -23,18 +23,35 @@ import { Server } from 'socket.io';
 const Pool = pg.Pool;
 const app = express();
 const port = 3000;
-
+const client = await pool.connect();
 const server = createServer(app);
-const io = new Server(server, {
-    cors: {
-        origin: ['http://localhost:80', 'http://localhost', 'http://localhost:5173', 
-            process.env.FRONTEND_URL].filter(Boolean),
-        credentials: true
-    }
-});
-
 
 dotenv.config();
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use('/api/purchases', purchaseRoutes);
+
+const io = new Server(server, {
+    cors: {
+        origin: [
+            'http://localhost:80', 
+            'http://localhost:5173', 
+            'http://localhost', 
+            'https://antonioescobar.lat',                    // ← HTTPS Frontend
+            'https://api.antonioescobar.lat',                // ← HTTPS API Gateway (aunque no funcionará)
+            'http://antonioescobar.lat',                     // ← HTTP fallback
+            process.env.FRONTEND_URL,                        // ← Ahora sí está definido
+            ...(process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : [])
+        ].filter(Boolean),
+        credentials: true,
+        methods: ['GET', 'POST']
+    },
+    // Configuraciones adicionales para mejor compatibilidad
+    transports: ['websocket', 'polling'],
+    allowEIO3: true
+});
+
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:80';
 
 const WORKERS_API_URL = process.env.WORKERS_API_URL || 'http://localhost:3000';
@@ -98,6 +115,7 @@ const checkJwt = auth({
     tokenSigningAlg: 'RS256'
 
 });
+
 // ✅ AÑADIR middleware de manejo de errores DESPUÉS del checkJwt
 const handleAuthError = (error, req, res, next) => {
     console.error('🚨 Error de autenticación JWT:', {
@@ -125,20 +143,30 @@ const handleAuthError = (error, req, res, next) => {
 // Webpay routes
 app.use('/webpay', webpayRoutes);
 
-// CORS configuration
+// 🔧 CORS PARA EXPRESS TAMBIÉN CORREGIDO
 app.use(cors({
     origin: [
         'http://localhost:80', 
         'http://localhost', 
         'http://localhost:5173', 
-        'http://frontend-grupo1-iic2173.s3-website-us-east-1.amazonaws.com', // ✅ Tu S3
-        process.env.FRONTEND_URL, 
-        'http://antonioescobar.lat'
+        'https://antonioescobar.lat',                    // ← HTTPS Frontend
+        'https://api.antonioescobar.lat',                // ← HTTPS API Gateway
+        'http://antonioescobar.lat',                     // ← HTTP fallback
+        process.env.FRONTEND_URL,
+        ...(process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : [])
     ].filter(Boolean),
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-    allowedHeaders: ['Content-Type', 'Authorization']
+    allowedHeaders: [
+        'Content-Type', 
+        'Authorization',
+        'X-Amz-Date',
+        'X-Api-Key', 
+        'X-Amz-Security-Token',
+        'X-Requested-With'
+    ]
 }));
+
 
 // Middleware de debugging
 app.use('/api/purchases', (req, res, next) => {
@@ -146,9 +174,33 @@ app.use('/api/purchases', (req, res, next) => {
     next();
 });
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-app.use('/api/purchases', purchaseRoutes);
+app.use((req, res, next) => {
+    const origin = req.get('Origin');
+    console.log(`🌐 Request from origin: ${origin}`);
+    console.log(`🔧 Method: ${req.method}, Path: ${req.path}`);
+    
+    // Añadir headers CORS manualmente si es necesario
+    if (origin && (
+        origin.includes('antonioescobar.lat') || 
+        origin.includes('localhost')
+    )) {
+        res.header('Access-Control-Allow-Origin', origin);
+        res.header('Access-Control-Allow-Credentials', 'true');
+        res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS,PATCH');
+        res.header('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token');
+    }
+    
+    // Responder a preflight requests
+    if (req.method === 'OPTIONS') {
+        console.log('🔄 Responding to preflight request');
+        return res.status(200).end();
+    }
+    
+    next();
+});
+
+
+
 
 // 🏛️ RUTAS DE SUBASTAS E INTERCAMBIOS (Solo para administradores)
 app.use('/admin', checkJwt, syncUser, (req, res, next) => {
@@ -157,7 +209,14 @@ app.use('/admin', checkJwt, syncUser, (req, res, next) => {
 }, adminRoutes);
 
 
-const client = await pool.connect();
+app.get('/cors-test', (req, res) => {
+    res.json({
+        message: 'CORS está funcionando',
+        origin: req.get('Origin'),
+        headers: req.headers,
+        timestamp: new Date().toISOString()
+    });
+});
 
 try {
     if (client) {
