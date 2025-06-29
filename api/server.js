@@ -12,8 +12,13 @@ import sequelize from './db/db.js';
 import { TransbankService } from './src/services/webpayService.js';
 import webpayRoutes from './src/routes/webpayRoutes.js';
 import { isAdmin, requireAdmin } from './auth-integration.js';
+
+import adminRoutes from './src/routes/adminRoutes.js';
+import { getMyStocks, saveExternalOffer, checkMyProposal, executeExchange, handleMyProposalRejected } from './src/controllers/auctionController.js';
+
 import { createServer } from 'http';
 import { Server } from 'socket.io';
+
 
 const Pool = pg.Pool;
 const app = express();
@@ -85,11 +90,13 @@ const pool = new Pool({
 const syncUser = createSyncUserMiddleware(pool);
 const GROUP_ID = process.env.GROUP_ID || "1";
 
-// CORREGIR: Configurar middleware de autenticación Auth0 con las variables correctas
+// CORREGIDO: Configurar middleware de autenticación Auth0 con las variables correctas
 const checkJwt = auth({
     audience: process.env.AUTH0_AUDIENCE || 'https://stockmarket-api/',
-    issuerBaseURL: process.env.AUTH0_DOMAIN ? `https://${process.env.AUTH0_DOMAIN}` : 'https://dev-ouxdigl1l6bn6n3r.us.auth0.com/',
-    tokenSigningAlg: 'RS256',
+
+    issuerBaseURL: `https://${process.env.AUTH0_DOMAIN || 'dev-ouxdigl1l6bn6n3r.us.auth0.com'}`,
+    tokenSigningAlg: 'RS256'
+
 });
 // ✅ AÑADIR middleware de manejo de errores DESPUÉS del checkJwt
 const handleAuthError = (error, req, res, next) => {
@@ -138,6 +145,12 @@ app.use('/api/purchases', (req, res, next) => {
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use('/api/purchases', purchaseRoutes);
+
+// 🏛️ RUTAS DE SUBASTAS E INTERCAMBIOS (Solo para administradores)
+app.use('/admin', checkJwt, syncUser, (req, res, next) => {
+    req.app.locals.pool = pool;
+    next();
+}, adminRoutes);
 
 
 const client = await pool.connect();
@@ -1104,6 +1117,19 @@ app.get('/purchases', checkJwt, syncUser, async (req, res) => {
     }
 });
 
+// ========================================
+// NUEVA RUTA: Mis Acciones (para todos los usuarios autenticados)
+// ========================================
+app.get('/my-stocks', checkJwt, syncUser, async (req, res) => {
+    try {
+        req.app.locals.pool = pool; // Asegurar que pool esté disponible
+        await getMyStocks(req, res);
+    } catch (error) {
+        console.error("Error en /my-stocks:", error);
+        res.status(500).json({ error: "Error interno del servidor" });
+    }
+});
+
 // Añade esta ruta de depuración para verificar duplicados
 app.get('/debug/check-duplicates', async (req, res) => {
     try {
@@ -1402,6 +1428,56 @@ app.post('/external-purchase', async (req, res) => {
     }
 });
 
+
+// ========================================
+// RUTAS PÚBLICAS PARA MQTT CLIENT (sin autenticación Auth0)
+// ========================================
+
+// Ruta pública para guardar ofertas externas (usada por MQTT client)
+app.post('/mqtt/external-offers', async (req, res) => {
+    try {
+        // Asegurar que pool esté disponible
+        req.app.locals.pool = pool;
+        await saveExternalOffer(req, res);
+    } catch (error) {
+        console.error("Error en ruta MQTT external-offers:", error);
+        res.status(500).json({ error: "Error interno del servidor" });
+    }
+});
+
+// Ruta pública para verificar propuestas (usada por MQTT client)
+app.post('/mqtt/check-my-proposal', async (req, res) => {
+    try {
+        req.app.locals.pool = pool;
+        await checkMyProposal(req, res);
+    } catch (error) {
+        console.error("Error en ruta MQTT check-my-proposal:", error);
+        res.status(500).json({ error: "Error interno del servidor" });
+    }
+});
+
+// Ruta pública para ejecutar intercambios (usada por MQTT client)
+app.post('/mqtt/execute-exchange', async (req, res) => {
+    try {
+        req.app.locals.pool = pool;
+        await executeExchange(req, res);
+    } catch (error) {
+        console.error("Error en ruta MQTT execute-exchange:", error);
+        res.status(500).json({ error: "Error interno del servidor" });
+    }
+});
+
+// Ruta pública para manejar rechazos (usada por MQTT client)
+app.post('/mqtt/handle-proposal-rejected', async (req, res) => {
+    try {
+        req.app.locals.pool = pool;
+        await handleMyProposalRejected(req, res);
+    } catch (error) {
+        console.error("Error en ruta MQTT handle-proposal-rejected:", error);
+        res.status(500).json({ error: "Error interno del servidor" });
+    }
+});
+
 // ENDPOINTS DE LOG DE EVENTOS ==============================================
 
 // Registrar evento
@@ -1514,6 +1590,23 @@ app.get('/check-request', async (req, res) => {
 // Agregar este endpoint de depuración después de los demás endpoints
 
 // Endpoint de depuración de token JWT
+// ENDPOINT DE DEBUG PARA AUTH0
+app.get('/debug/auth', (req, res) => {
+    const authHeader = req.headers.authorization;
+    console.log('🔍 DEBUG Auth Header:', authHeader);
+    console.log('🔍 DEBUG Headers completos:', JSON.stringify(req.headers, null, 2));
+    
+    res.json({
+        authHeader: authHeader,
+        hasAuth: !!authHeader,
+        config: {
+            domain: process.env.AUTH0_DOMAIN,
+            audience: process.env.AUTH0_AUDIENCE,
+            issuerURL: `https://${process.env.AUTH0_DOMAIN || 'dev-ouxdigl1l6bn6n3r.us.auth0.com'}`
+        }
+    });
+});
+
 app.get('/debug/token', checkJwt, async (req, res) => {
     try {
         // 1. Extraer el token del encabezado

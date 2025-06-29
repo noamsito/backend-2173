@@ -20,6 +20,7 @@ const options = {
 const UPDATES_TOPIC = "stocks/updates";
 const REQUESTS_TOPIC = "stocks/requests";
 const VALIDATION_TOPIC = 'stocks/validation';
+const AUCTIONS_TOPIC = "stocks/auctions"; // NUEVO: Canal de subastas
 const GROUP_ID = process.env.GROUP_ID || "1"; // Cambiar por tu ID de grupo
 
 console.log("Conectando a MQTT broker:", options);
@@ -45,11 +46,10 @@ client.on("connect", () => {
     console.log("Conectado a MQTT broker");
     reconnectCount = 0; // Resetear contador de reconexión
 
-    // Suscribir a ambos canales
-    
-    client.subscribe([UPDATES_TOPIC, REQUESTS_TOPIC, VALIDATION_TOPIC], (err) => {
+    // Suscribir a todos los canales incluyendo subastas
+    client.subscribe([UPDATES_TOPIC, REQUESTS_TOPIC, VALIDATION_TOPIC, AUCTIONS_TOPIC], (err) => {
         if (!err) {
-            console.log("Suscrito a:", UPDATES_TOPIC, REQUESTS_TOPIC);
+            console.log("Suscrito a:", UPDATES_TOPIC, REQUESTS_TOPIC, VALIDATION_TOPIC, AUCTIONS_TOPIC);
         } else {
             console.error("Error de suscripción:", err);
         }
@@ -68,6 +68,9 @@ client.on("message", (topic, message) => {
         handlePurchaseMessage(messageStr);
     } else if (topic === VALIDATION_TOPIC) {
         handleValidationMessage(messageStr);
+    } else if (topic === AUCTIONS_TOPIC) {
+        // NUEVO: Manejo de mensajes de subastas e intercambios
+        handleAuctionMessage(messageStr);
     }
 });
 
@@ -371,6 +374,278 @@ function publishPurchaseRequest(requestData) {
     return requestId;
 }
 
+// NUEVO: Función para manejar mensajes del canal de subastas siguiendo el formato exacto del enunciado
+async function handleAuctionMessage(messageStr) {
+    try {
+        const auctionData = JSON.parse(messageStr);
+        console.log("Mensaje de subasta recibido:", auctionData);
+        
+        // Verificar si el mensaje tiene el formato del enunciado (con campo "operation")
+        if (auctionData.operation) {
+            switch (auctionData.operation) {
+                case 'offer':
+                    await handleOfferReceived(auctionData);
+                    break;
+                case 'proposal':
+                    await handleProposalReceived(auctionData);
+                    break;
+                case 'acceptance':
+                case 'rejection':
+                    await handleResponseReceived(auctionData);
+                    break;
+                default:
+                    console.log(`Operación desconocida: ${auctionData.operation}`);
+            }
+        }
+        // Mantener compatibilidad con formato anterior (para mensajes internos)
+        else if (auctionData.type) {
+        switch (auctionData.type) {
+            case 'EXCHANGE_PROPOSAL':
+                await handleExchangeProposal(auctionData);
+                break;
+            case 'EXCHANGE_RESPONSE':
+                await handleExchangeResponse(auctionData);
+                break;
+            default:
+                console.log(`Tipo de mensaje de subasta desconocido: ${auctionData.type}`);
+            }
+        } else {
+            console.log("Mensaje de subasta sin tipo, ignorando");
+        }
+    } catch (err) {
+        console.error("Error procesando mensaje de subasta:", err);
+    }
+}
+
+// NUEVO: Manejar ofertas recibidas (operation: "offer")
+async function handleOfferReceived(offerData) {
+    try {
+        // Verificar si la oferta es de otro grupo
+        if (String(offerData.group_id) !== String(GROUP_ID)) {
+            console.log(`📥 Oferta recibida del grupo ${offerData.group_id}: ${offerData.quantity} ${offerData.symbol}`);
+            
+            // Guardar oferta externa en la API (ruta pública para MQTT)
+            const endpointUrl = "http://api:3000/mqtt/external-offers";
+            await fetchWithRetry(endpointUrl, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    auction_id: offerData.auction_id,
+                    proposal_id: offerData.proposal_id || "",
+                    group_id: offerData.group_id,
+                    symbol: offerData.symbol,
+                    quantity: offerData.quantity,
+                    timestamp: offerData.timestamp,
+                    operation: offerData.operation
+                })
+            }, "oferta externa");
+        } else {
+            console.log(`⚠️ Ignorando nuestra propia oferta: ${offerData.auction_id}`);
+        }
+    } catch (err) {
+        console.error("Error procesando oferta recibida:", err);
+    }
+}
+
+// NUEVO: Manejar propuestas recibidas (operation: "proposal")
+async function handleProposalReceived(proposalData) {
+    try {
+        // Verificar si la propuesta es de otro grupo
+        if (String(proposalData.group_id) !== String(GROUP_ID)) {
+            console.log(`📩 Propuesta recibida del grupo ${proposalData.group_id} para auction_id: ${proposalData.auction_id}`);
+            console.log(`Detalles: ${proposalData.quantity} ${proposalData.symbol} - proposal_id: ${proposalData.proposal_id}`);
+            
+            // Guardar propuesta externa en la API (ruta pública para MQTT)
+            const endpointUrl = "http://api:3000/mqtt/external-offers";
+            await fetchWithRetry(endpointUrl, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    auction_id: proposalData.auction_id,
+                    proposal_id: proposalData.proposal_id,
+                    group_id: proposalData.group_id,
+                    symbol: proposalData.symbol,
+                    quantity: proposalData.quantity,
+                    timestamp: proposalData.timestamp,
+                    operation: proposalData.operation
+                })
+            }, "propuesta externa");
+        } else {
+            console.log(`⚠️ Ignorando nuestra propia propuesta: ${proposalData.proposal_id}`);
+        }
+    } catch (err) {
+        console.error("Error procesando propuesta recibida:", err);
+    }
+}
+
+// NUEVO: Manejar respuestas recibidas (operation: "acceptance" o "rejection")
+async function handleResponseReceived(responseData) {
+    try {
+        // Verificar si la respuesta es de otro grupo
+        if (String(responseData.group_id) !== String(GROUP_ID)) {
+            console.log(`📋 Respuesta recibida del grupo ${responseData.group_id}: ${responseData.operation} para proposal_id: ${responseData.proposal_id}`);
+            
+            // Guardar respuesta externa en la API (ruta pública para MQTT)
+            const endpointUrl = "http://api:3000/mqtt/external-offers";
+            await fetchWithRetry(endpointUrl, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    auction_id: responseData.auction_id,
+                    proposal_id: responseData.proposal_id,
+                    group_id: responseData.group_id,
+                    symbol: responseData.symbol,
+                    quantity: responseData.quantity,
+                    timestamp: responseData.timestamp,
+                    operation: responseData.operation
+                })
+            }, "respuesta externa");
+
+            // ✨ NUEVO: Si es una aceptación, verificar si aceptaron MI propuesta
+            if (responseData.operation === 'acceptance') {
+                console.log(`🎉 ¡Propuesta aceptada! Verificando si es mía...`);
+                
+                // Verificar si tengo una propuesta con este proposal_id en mi historial
+                const checkProposalUrl = "http://api:3000/mqtt/check-my-proposal";
+                try {
+                    const checkResponse = await fetch(checkProposalUrl, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            auction_id: responseData.auction_id,
+                            proposal_id: responseData.proposal_id
+                        })
+                    });
+                    
+                    if (checkResponse.ok) {
+                        const checkData = await checkResponse.json();
+                        if (checkData.is_my_proposal) {
+                            console.log(`🔄 ¡Mi propuesta fue aceptada! Procesando intercambio...`);
+                            
+                            // CORRECCIÓN: Usar datos de la oferta original para lo que voy a recibir
+                            if (checkData.original_offer) {
+                                console.log(`📤 Doy: ${checkData.my_proposal.quantity} ${checkData.my_proposal.symbol}`);
+                                console.log(`📥 Recibo: ${checkData.original_offer.quantity} ${checkData.original_offer.symbol}`);
+                                
+                                // Ejecutar el intercambio en mi backend con los datos correctos
+                                const exchangeUrl = "http://api:3000/mqtt/execute-exchange";
+                                await fetchWithRetry(exchangeUrl, {
+                                    method: "POST",
+                                    headers: { "Content-Type": "application/json" },
+                                    body: JSON.stringify({
+                                        auction_id: responseData.auction_id,
+                                        proposal_id: responseData.proposal_id,
+                                        give_symbol: checkData.my_proposal.symbol,        // Lo que doy (mi propuesta)
+                                        give_quantity: checkData.my_proposal.quantity,
+                                        receive_symbol: checkData.original_offer.symbol,  // Lo que recibo (oferta original)
+                                        receive_quantity: checkData.original_offer.quantity,
+                                        counterpart_group: responseData.group_id
+                                    })
+                                }, "ejecución de intercambio");
+                            } else {
+                                console.error(`❌ No se encontró la oferta original. No se puede completar el intercambio.`);
+                                console.log(`📤 Datos disponibles - Mi propuesta: ${checkData.my_proposal.quantity} ${checkData.my_proposal.symbol}`);
+                                console.log(`❌ Datos faltantes - Oferta original no encontrada`);
+                            }
+                        }
+                    }
+                } catch (checkError) {
+                    console.error("Error verificando si es mi propuesta:", checkError);
+                }
+            }
+            
+            // 🔓 NUEVO: Si es un rechazo, verificar si rechazaron MI propuesta para devolver acciones
+            else if (responseData.operation === 'rejection') {
+                console.log(`💔 ¡Propuesta rechazada! Verificando si es mía...`);
+                
+                // Verificar si tengo una propuesta con este proposal_id en mi historial
+                const checkProposalUrl = "http://api:3000/mqtt/check-my-proposal";
+                try {
+                    const checkResponse = await fetch(checkProposalUrl, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            auction_id: responseData.auction_id,
+                            proposal_id: responseData.proposal_id
+                        })
+                    });
+                    
+                    if (checkResponse.ok) {
+                        const checkData = await checkResponse.json();
+                        if (checkData.is_my_proposal) {
+                            console.log(`🔓 ¡Mi propuesta fue rechazada! Devolviendo acciones reservadas...`);
+                            console.log(`🔓 Acciones a devolver: ${checkData.my_proposal.quantity} ${checkData.my_proposal.symbol}`);
+                            
+                            // Manejar el rechazo devolviendo las acciones reservadas
+                            const rejectionUrl = "http://api:3000/mqtt/handle-proposal-rejected";
+                            await fetchWithRetry(rejectionUrl, {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({
+                                    auction_id: responseData.auction_id,
+                                    proposal_id: responseData.proposal_id
+                                })
+                            }, "manejo de rechazo de propuesta");
+                        }
+                    }
+                } catch (checkError) {
+                    console.error("Error verificando si es mi propuesta rechazada:", checkError);
+                }
+            }
+            
+        } else {
+            console.log(`⚠️ Ignorando nuestra propia respuesta: ${responseData.proposal_id}`);
+        }
+    } catch (err) {
+        console.error("Error procesando respuesta recibida:", err);
+    }
+}
+
+// Mantener para compatibilidad - Manejar propuestas de intercambio
+async function handleExchangeProposal(auctionData) {
+    try {
+        // Verificar si la propuesta es para nuestro grupo
+        if (String(auctionData.target_group_id) === String(GROUP_ID)) {
+            console.log(`Propuesta de intercambio recibida del grupo ${auctionData.origin_group_id}`);
+            
+            // Enviar a la API para procesar
+            const endpointUrl = "http://api:3000/exchanges/proposal";
+            await fetchWithRetry(endpointUrl, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(auctionData)
+            }, "propuesta de intercambio");
+        }
+    } catch (err) {
+        console.error("Error procesando propuesta de intercambio:", err);
+    }
+}
+
+// Mantener para compatibilidad - Manejar respuestas de intercambio
+async function handleExchangeResponse(auctionData) {
+    try {
+        // Verificar si la respuesta es para una propuesta nuestra
+        if (String(auctionData.origin_group_id) === String(GROUP_ID)) {
+            console.log(`Respuesta de intercambio recibida: ${auctionData.exchange_id} - ${auctionData.status}`);
+            
+            // Enviar a la API para procesar
+            const endpointUrl = "http://api:3000/exchanges/response";
+            await fetchWithRetry(endpointUrl, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(auctionData)
+            }, "respuesta de intercambio");
+        }
+    } catch (err) {
+        console.error("Error procesando respuesta de intercambio:", err);
+    }
+}
+
+// Función para publicar mensajes de subastas
+function publishAuctionMessage(messageData) {
+    client.publish(AUCTIONS_TOPIC, JSON.stringify(messageData));
+    console.log("Mensaje de subasta publicado:", messageData);
+}
 
 // minisv
 const app = express();

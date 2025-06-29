@@ -24,12 +24,23 @@ services:
       - NEW_RELIC_APP_NAME=new_relic_back
       - NEW_RELIC_LOG=stdout
       - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/  # NUEVA VARIABLE
+      # ========================================
+      # AUTH0 CONFIGURACIÓN (CRÍTICO PARA INTERCAMBIOS)
+      # ========================================
+      - AUTH0_DOMAIN=dev-ouxdigl1l6bn6n3r.us.auth0.com
+      - AUTH0_AUDIENCE=https://stockmarket-api/
+      - BYPASS_AUTH=false
+      - NODE_ENV=development
+      # ========================================
       - TRANSBANK_ENVIRONMENT=integration
       - FRONTEND_URL=http://localhost:80
       - TRANSBANK_COMMERCE_CODE=597055555532
       - TRANSBANK_API_KEY=579B532A7440BB0C9079DED94D31EA1615BACEB56610332264630D42D0A36B1C
       - TRANSBANK_RETURN_URL=http://localhost:3000/webpay/return
       - TRANSBANK_FINAL_URL=http://localhost:80/payment/result
+      - BOLETAS_LAMBDA_URL=https://fa4etel4l6.execute-api.us-east-1.amazonaws.com/dev
+      - WORKERS_API_URL=http://api:3000
+      - JOBMASTER_URL=http://localhost:4000
     volumes:
       - ./mqtt-client:/app/mqtt-client
     restart: unless-stopped
