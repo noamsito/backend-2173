@@ -153,3 +153,9 @@ ALTER TABLE purchase_requests ADD COLUMN is_resale BOOLEAN DEFAULT FALSE;
 ALTER TABLE purchase_requests ADD COLUMN IF NOT EXISTS is_resale BOOLEAN DEFAULT FALSE;
 ALTER TABLE purchase_requests ADD COLUMN IF NOT EXISTS reason TEXT;
 ALTER TABLE purchase_requests ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+
+-- Agregar la columna request_id a la tabla purchases
+ALTER TABLE purchases ADD COLUMN IF NOT EXISTS request_id VARCHAR(255);
+
+-- Crear índice para mejorar consultas
+CREATE INDEX IF NOT EXISTS idx_purchases_request_id ON purchases(request_id);

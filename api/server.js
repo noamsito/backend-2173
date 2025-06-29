@@ -12,10 +12,21 @@ import sequelize from './db/db.js';
 import { TransbankService } from './src/services/webpayService.js';
 import webpayRoutes from './src/routes/webpayRoutes.js';
 import { isAdmin, requireAdmin } from './auth-integration.js';
+import { createServer } from 'http';
+import { Server } from 'socket.io';
 
 const Pool = pg.Pool;
 const app = express();
 const port = 3000;
+
+const server = createServer(app);
+const io = new Server(server, {
+    cors: {
+        origin: ['http://localhost:80', 'http://localhost', 'http://localhost:5173', 
+            process.env.FRONTEND_URL].filter(Boolean),
+        credentials: true
+    }
+});
 
 
 dotenv.config();
@@ -140,6 +151,68 @@ try {
 } catch (error) {
     console.error("Error conectando a la base de datos:", error);
 }
+
+// ✅ CONFIGURAR WEBSOCKETS
+io.on('connection', (socket) => {
+    console.log(`🔌 Cliente conectado: ${socket.id}`);
+    
+    // Unirse a room de actualizaciones de stocks
+    socket.join('stock-updates');
+    
+    // Notificar conexión exitosa
+    socket.emit('connected', { 
+        message: 'Conectado al sistema de actualizaciones en tiempo real',
+        timestamp: new Date().toISOString()
+    });
+    
+    socket.on('disconnect', () => {
+        console.log(`🔌 Cliente desconectado: ${socket.id}`);
+    });
+    
+    // Manejar errores de socket
+    socket.on('error', (error) => {
+        console.error('❌ Error en WebSocket:', error);
+    });
+});
+
+// ✅ FUNCIÓN HELPER PARA EMITIR ACTUALIZACIONES
+function broadcastStockUpdate(type, data) {
+    console.log(`📡 Broadcasting ${type}:`, data);
+    io.to('stock-updates').emit('stock-update', {
+        type,
+        data,
+        timestamp: new Date().toISOString()
+    });
+}
+
+// ✅ FUNCIÓN PARA OBTENER NÚMERO DE CLIENTES CONECTADOS
+function getConnectedClientsCount() {
+    return io.engine.clientsCount;
+}
+
+// ✅ ENDPOINT PARA ESTADÍSTICAS DE WEBSOCKET
+app.get('/websocket/stats', (req, res) => {
+    res.json({
+        connected_clients: getConnectedClientsCount(),
+        server_uptime: process.uptime(),
+        timestamp: new Date().toISOString()
+    });
+});
+
+// ✅ ENDPOINT PARA TESTEAR BROADCAST (SOLO PARA DESARROLLO)
+app.post('/websocket/test', (req, res) => {
+    if (process.env.NODE_ENV !== 'development') {
+        return res.status(403).json({ error: 'Solo disponible en desarrollo' });
+    }
+    
+    const { type, data } = req.body;
+    broadcastStockUpdate(type || 'test', data || { message: 'Test broadcast' });
+    
+    res.json({ 
+        message: 'Test broadcast enviado',
+        connected_clients: getConnectedClientsCount()
+    });
+});
 
 // Función helper para registrar eventos
 async function logEvent(type, details) {
@@ -828,7 +901,7 @@ app.post('/stocks/buy', checkJwt, handleAuthError, syncUser, async (req, res) =>
             }
 
             stock = stockResult.rows[0];
-            totalCost = stock.price * quantity;
+            totalCost = Math.round(stock.price * quantity);
             // TODO: lógica especifica para compra de reventa (usuarios regulares)
             console.log(`Reventa encontrada: ${stock.long_name}, precio: $${stock.price}, disponible: ${stock.quantity}`);
         } else {
@@ -856,7 +929,7 @@ app.post('/stocks/buy', checkJwt, handleAuthError, syncUser, async (req, res) =>
                 return res.status(400).json({ error: "No hay suficientes acciones disponibles" });
             }
             
-            totalCost = stock.price * quantity;
+            totalCost = Math.round(stock.price * quantity);
         }
 
         // ✅ SIN VERIFICACIÓN DE WALLET - El pago se valida via WebPay
@@ -1162,15 +1235,34 @@ app.post('/external-purchase', async (req, res) => {
     try {
         const purchase = req.body;
         
+        console.log(`🔄 Recibida compra externa:`, purchase);
+        
+        // ✅ VALIDACIÓN MEJORADA
         if (!purchase.symbol || !purchase.quantity || !purchase.request_id) {
-            return res.status(400).json({ error: "Datos de compra inválidos" });
+            console.error('❌ Datos de compra externa inválidos:', purchase);
+            return res.status(400).json({ 
+                error: "Datos de compra inválidos",
+                required: ["symbol", "quantity", "request_id"],
+                received: Object.keys(purchase)
+            });
         }
+        // Validar que quantity sea un número positivo
+        const quantity = parseInt(purchase.quantity);
+        if (isNaN(quantity) || quantity <= 0) {
+            return res.status(400).json({ 
+                error: "Cantidad debe ser un número positivo",
+                received: purchase.quantity
+            });
+        }
+        
         
         console.log(`Procesando compra externa: ${purchase.quantity} acciones de ${purchase.symbol}, request_id: ${purchase.request_id}`);
         
         // Obtener la entrada más reciente de la acción
+        // ✅ OBTENER STOCK ACTUAL CON MÁS INFORMACIÓN
         const stockQuery = `
-            SELECT id, quantity, symbol FROM stocks 
+            SELECT id, symbol, quantity, price, long_name, timestamp
+            FROM stocks 
             WHERE symbol = $1 
             ORDER BY timestamp DESC 
             LIMIT 1
@@ -1184,31 +1276,129 @@ app.post('/external-purchase', async (req, res) => {
         }
         
         const stock = stockResult.rows[0];
+        console.log(`📊 Stock encontrado: ${stock.long_name}, disponible: ${stock.quantity}, precio: $${stock.price}`);
         
-        // Verificar si hay suficientes acciones
-        if (stock.quantity < purchase.quantity) {
-            console.log(`No hay suficientes acciones de ${purchase.symbol} disponibles (tenemos ${stock.quantity}, se pidieron ${purchase.quantity})`);
+        // ✅ VERIFICAR DISPONIBILIDAD
+        if (stock.quantity < quantity) {
+            console.error(`❌ Stock insuficiente: ${stock.quantity} < ${quantity}`);
+            
+            // ✅ NOTIFICAR FALTA DE STOCK VIA WEBSOCKET
+            broadcastStockUpdate('insufficient_stock', {
+                symbol: purchase.symbol,
+                long_name: stock.long_name,
+                requested_quantity: quantity,
+                available_quantity: stock.quantity,
+                group_id: purchase.group_id || 'unknown',
+                request_id: purchase.request_id
+            });
+            
             return res.status(400).json({ 
-                error: `No hay suficientes acciones de ${purchase.symbol} disponibles` 
+                error: `Stock insuficiente para ${purchase.symbol}`,
+                details: {
+                    requested: quantity,
+                    available: stock.quantity,
+                    shortfall: quantity - stock.quantity
+                }
             });
         }
         
-        // Actualizar cantidad de acciones
-        await client.query(`
+        // ✅ ACTUALIZAR INVENTARIO
+        const updateResult = await client.query(`
             UPDATE stocks 
-            SET quantity = quantity - $1 
+            SET quantity = quantity - $1,
+                timestamp = CURRENT_TIMESTAMP
             WHERE id = $2
-        `, [purchase.quantity, stock.id]);
+            RETURNING quantity
+        `, [quantity, stock.id]);
         
-        console.log(`Actualizado inventario para compra externa: ${purchase.symbol}, -${purchase.quantity} acciones`);
+        const newQuantity = updateResult.rows[0].quantity;
         
-        // Registrar evento
-        await logEvent('EXTERNAL_PURCHASE', purchase);
+        console.log(`✅ Inventario actualizado: ${purchase.symbol} ${stock.quantity} → ${newQuantity} (-${quantity})`);
         
-        res.json({ status: "success" });
+        // ✅ REGISTRAR EVENTO EN BASE DE DATOS
+        await logEvent('EXTERNAL_PURCHASE', {
+            ...purchase,
+            original_quantity: stock.quantity,
+            new_quantity: newQuantity,
+            price_at_time: stock.price,
+            total_value: stock.price * quantity,
+            processed_at: new Date().toISOString()
+        });
+        
+        // ✅ EMITIR ACTUALIZACIÓN VIA WEBSOCKET
+        broadcastStockUpdate('external_purchase', {
+            symbol: purchase.symbol,
+            long_name: stock.long_name,
+            quantity_purchased: quantity,
+            original_quantity: stock.quantity,
+            remaining_quantity: newQuantity,
+            price: stock.price,
+            total_value: (stock.price * quantity).toFixed(2),
+            group_id: purchase.group_id || 'unknown',
+            request_id: purchase.request_id,
+            buyer_info: {
+                user_id: purchase.user_id || 'unknown',
+                group_id: purchase.group_id || 'unknown'
+            },
+            // ✅ INFORMACIÓN ÚTIL PARA EL FRONTEND
+            percentage_sold: ((quantity / stock.quantity) * 100).toFixed(1),
+            is_low_stock: newQuantity < 10,
+            is_out_of_stock: newQuantity === 0
+        });
+        
+        // ✅ SI QUEDA POCO STOCK, ENVIAR ALERTA ADICIONAL
+        if (newQuantity < 10 && newQuantity > 0) {
+            broadcastStockUpdate('low_stock_alert', {
+                symbol: purchase.symbol,
+                long_name: stock.long_name,
+                remaining_quantity: newQuantity,
+                threshold: 10
+            });
+        }
+        
+        // ✅ SI SE AGOTÓ EL STOCK, ENVIAR ALERTA
+        if (newQuantity === 0) {
+            broadcastStockUpdate('out_of_stock', {
+                symbol: purchase.symbol,
+                long_name: stock.long_name,
+                last_purchase: {
+                    quantity: quantity,
+                    group_id: purchase.group_id || 'unknown'
+                }
+            });
+        }
+        
+        // ✅ RESPUESTA EXITOSA CON MÁS INFORMACIÓN
+        res.json({ 
+            status: "success", 
+            message: "Compra externa procesada exitosamente",
+            data: {
+                symbol: purchase.symbol,
+                long_name: stock.long_name,
+                quantity_purchased: quantity,
+                remaining_quantity: newQuantity,
+                price_per_share: stock.price,
+                total_transaction_value: (stock.price * quantity).toFixed(2),
+                connected_clients: getConnectedClientsCount(),
+                timestamp: new Date().toISOString()
+            }
+        });
+        
     } catch (error) {
-        console.error("Error procesando compra externa:", error);
-        res.status(500).json({ error: "Error interno del servidor" });
+        console.error("❌ Error procesando compra externa:", error);
+        
+        // ✅ EMITIR ERROR VIA WEBSOCKET
+        broadcastStockUpdate('external_purchase_error', {
+            error: error.message,
+            request_data: req.body,
+            timestamp: new Date().toISOString()
+        });
+        
+        res.status(500).json({ 
+            error: "Error interno del servidor",
+            details: process.env.NODE_ENV === 'development' ? error.message : 'Error procesando compra externa',
+            request_id: req.body?.request_id || null
+        });
     }
 });
 
@@ -1566,7 +1756,7 @@ app.post('/admin/stocks/resale', checkJwt, syncUser, requireAdmin, async (req, r
             });
         }
         
-        // Verificar que la compra existe y pertenece al admin
+        // ✅ VERIFICAR QUE LA COMPRA EXISTE, ESTÁ ACEPTADA Y PERTENECE AL ADMIN
         const purchaseQuery = `
             SELECT pr.*, s.long_name 
             FROM purchase_requests pr
@@ -1757,6 +1947,7 @@ app.patch('/admin/stocks/resale/:resale_id', checkJwt, syncUser, requireAdmin, a
     }
 });
 
-app.listen(port, '0.0.0.0',() => {
-    console.log(`Servidor ejecutándose en http://localhost:${port}`);
+server.listen(port, '0.0.0.0',() => {
+    console.log(`🚀 Servidor con WebSockets ejecutándose en http://localhost:${port}`);
+    console.log(`📡 WebSocket server listo para actualizaciones en tiempo real`);
 });
