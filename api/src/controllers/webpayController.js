@@ -264,65 +264,15 @@ export class WebpayController {
   static async processSuccessfulPurchase(client, transaction) {
     try {
       const { user_id, symbol, quantity, request_id, amount } = transaction;
-      
-      const mqttMessage = {
-        request_id: request_id,
-        group_id: process.env.GROUP_ID || "1",
-        quantity: quantity,
-        symbol: symbol,
-        stock_origin: 0,
-        operation: "BUY",
-        deposit_token: transaction.token_ws
-      };
-      
-      try {
-        await axios.post('http://mqtt-client:3000/publish', {
-          topic: 'stocks/requests',
-          message: mqttMessage
-        });
-        
-        console.log(`📡 Solicitud enviada al broker MQTT DESPUÉS de pago exitoso: ${request_id}`);
-      } catch (mqttError) {
-        console.error('❌ Error enviando al broker MQTT:', mqttError);
-        // Continuar con el proceso aunque falle el envío
-      }
-      
-      // 1. ACTUALIZAR SOLICITUD DE COMPRA (ya existe desde el flujo inicial)
-      const updatePurchaseQuery = `
-        UPDATE purchase_requests 
-        SET status = 'ACCEPTED',
-            updated_at = CURRENT_TIMESTAMP
-        WHERE request_id = $1
-        RETURNING id
-      `;
-      
-      await client.query(updatePurchaseQuery, [request_id]);
-      console.log(`✅ Solicitud de compra actualizada a ACCEPTED: ${request_id}`);
-      
-      // 2. ✅ SIN DESCUENTO DE WALLET - El pago se procesó via WebPay
-      console.log(`💰 Pago de $${amount} procesado exitosamente via WebPay (sin descuento de wallet)`);
-      
-      // 3. ENVIAR VALIDACIÓN POR MQTT (según enunciado)
-      const validationMessage = {
-        request_id: request_id,
-        timestamp: new Date().toISOString(),
-        status: "ACCEPTED",
-        reason: "Pago procesado exitosamente via WebPay"
-      };
-      
-      try {
-        await axios.post('http://mqtt-client:3000/publish', {
-          topic: 'stocks/validation',
-          message: validationMessage
-        });
-        
-        console.log(`📡 Validación enviada por stocks/validation: ${request_id}`);
-      } catch (mqttError) {
-        console.error('❌ Error enviando validación al broker MQTT:', mqttError);
-        // No fallar la compra por esto
-      }
 
-      try {
+      const isResale = symbol.endsWith('_r');
+      
+      // ✅ SEPARAR COMPLETAMENTE EL FLUJO ENTRE ORIGINALES Y REVENTAS
+      if (isResale) {
+        // 🔄 FLUJO PARA REVENTAS - Procesamiento directo
+        console.log(`🔄 Procesando REVENTA directamente: ${symbol}`);
+        
+        // 1. Actualizar stock de reventa (reducir cantidad disponible)
         await client.query(`
           UPDATE stocks 
           SET quantity = quantity - $1 
@@ -330,45 +280,164 @@ export class WebpayController {
           AND id = (SELECT id FROM stocks WHERE symbol = $2 ORDER BY timestamp DESC LIMIT 1)
         `, [quantity, symbol]);
         
-        console.log(`📦 Acciones reservadas después de pago exitoso: ${quantity} de ${symbol}`);
-      } catch (stockError) {
-        console.error('❌ Error reservando acciones:', stockError);
-        // Continuar con el proceso
-      }
-      
-      // 4. REGISTRAR EVENTO DE COMPRA EXITOSA usando logEvent
-      const eventDetails = {
-        request_id: request_id,
-        status: 'ACCEPTED',
-        symbol: symbol,
-        quantity: quantity,
-        price: amount / quantity,
-        user_id: user_id,
-        payment_method: 'webpay',
-        timestamp: new Date().toISOString()
-      };
-      
-      // Usar la función logEvent del servidor principal
-      try {
-        await axios.post('http://api:3000/events', {
-          type: 'PURCHASE_VALIDATION',
-          details: eventDetails
-        });
-        console.log(`✅ Evento de compra WebPay registrado: ${request_id}`);
-      } catch (eventError) {
-        console.error('❌ Error registrando evento de compra:', eventError);
-        // Registrar directamente como fallback
+        // 2. Actualizar solicitud de compra
         await client.query(`
-          INSERT INTO events (type, details)
-          VALUES ($1, $2)
-        `, [
-          'PURCHASE_VALIDATION',
-          JSON.stringify({
-            ...eventDetails,
-            event_text: `Compraste ${quantity} acciones de ${symbol} por un total de $${amount.toFixed(2)}.`
-          })
-        ]);
+          UPDATE purchase_requests 
+          SET status = 'ACCEPTED',
+              updated_at = CURRENT_TIMESTAMP
+          WHERE request_id = $1
+        `, [request_id]);
+        
+        // 3. Crear registro en purchases (compra finalizada)
+        await client.query(`
+          INSERT INTO purchases 
+          (request_id, user_id, symbol, quantity, price, status, created_at)
+          SELECT pr.request_id, pr.user_id, pr.symbol, pr.quantity, pr.price, 'COMPLETED', NOW()
+          FROM purchase_requests pr
+          WHERE pr.request_id = $1
+        `, [request_id]);
+        
+        // 4. Registrar evento de compra exitosa
+        const eventDetails = {
+          request_id: request_id,
+          status: 'ACCEPTED',
+          symbol: symbol,
+          quantity: quantity,
+          price: amount / quantity,
+          user_id: user_id,
+          payment_method: 'webpay',
+          purchase_type: 'resale',
+          timestamp: new Date().toISOString()
+        };
+        
+        try {
+          await axios.post('http://api:3000/events', {
+            type: 'PURCHASE_VALIDATION',
+            details: eventDetails
+          });
+          console.log(`✅ Evento de compra REVENTA registrado: ${request_id}`);
+        } catch (eventError) {
+          console.error('❌ Error registrando evento de reventa:', eventError);
+          // Registrar directamente como fallback
+          await client.query(`
+            INSERT INTO events (type, details)
+            VALUES ($1, $2)
+          `, [
+            'PURCHASE_VALIDATION',
+            JSON.stringify({
+              ...eventDetails,
+              event_text: `Compraste ${quantity} acciones de ${symbol} por un total de $${amount.toFixed(2)}.`
+            })
+          ]);
+        }
+        
+        console.log(`✅ Reventa procesada completamente: ${quantity} acciones de ${symbol}`);
+        
+      } else {
+        // 📡 FLUJO PARA ORIGINALES - Via MQTT
+        console.log(`📡 Procesando compra ORIGINAL via MQTT: ${symbol}`);
+        
+        // 1. Actualizar solicitud de compra como ACCEPTED
+        await client.query(`
+          UPDATE purchase_requests 
+          SET status = 'ACCEPTED',
+              updated_at = CURRENT_TIMESTAMP
+          WHERE request_id = $1
+        `, [request_id]);
+        
+        // 2. Enviar al broker MQTT
+        const mqttMessage = {
+          request_id: request_id,
+          group_id: process.env.GROUP_ID || "1",
+          quantity: quantity,
+          symbol: symbol,
+          stock_origin: 0,
+          operation: "BUY",
+          deposit_token: transaction.token_ws
+        };
+        
+        try {
+          await axios.post('http://mqtt-client:3000/publish', {
+            topic: 'stocks/requests',
+            message: mqttMessage
+          });
+          
+          console.log(`📡 Solicitud ORIGINAL enviada al broker MQTT: ${request_id}`);
+        } catch (mqttError) {
+          console.error('❌ Error enviando al broker MQTT:', mqttError);
+          // Continuar con el proceso aunque falle el envío
+        }
+        
+        // 3. Enviar validación por MQTT
+        const validationMessage = {
+          request_id: request_id,
+          timestamp: new Date().toISOString(),
+          status: "ACCEPTED",
+          reason: "Pago procesado exitosamente via WebPay"
+        };
+        
+        try {
+          await axios.post('http://mqtt-client:3000/publish', {
+            topic: 'stocks/validation',
+            message: validationMessage
+          });
+          
+          console.log(`📡 Validación enviada por stocks/validation: ${request_id}`);
+        } catch (mqttError) {
+          console.error('❌ Error enviando validación al broker MQTT:', mqttError);
+        }
+        
+        // 4. Registrar evento de compra exitosa
+        const eventDetails = {
+          request_id: request_id,
+          status: 'ACCEPTED',
+          symbol: symbol,
+          quantity: quantity,
+          price: amount / quantity,
+          user_id: user_id,
+          payment_method: 'webpay',
+          purchase_type: 'original',
+          timestamp: new Date().toISOString()
+        };
+        
+        try {
+          await axios.post('http://api:3000/events', {
+            type: 'PURCHASE_VALIDATION',
+            details: eventDetails
+          });
+          console.log(`✅ Evento de compra ORIGINAL registrado: ${request_id}`);
+        } catch (eventError) {
+          console.error('❌ Error registrando evento de compra:', eventError);
+          // Registrar directamente como fallback
+          await client.query(`
+            INSERT INTO events (type, details)
+            VALUES ($1, $2)
+          `, [
+            'PURCHASE_VALIDATION',
+            JSON.stringify({
+              ...eventDetails,
+              event_text: `Compraste ${quantity} acciones de ${symbol} por un total de $${amount.toFixed(2)}.`
+            })
+          ]);
+        }
+        
+        // 5. Reservar acciones temporalmente
+        try {
+          await client.query(`
+            UPDATE stocks 
+            SET quantity = quantity - $1 
+            WHERE symbol = $2
+            AND id = (SELECT id FROM stocks WHERE symbol = $2 ORDER BY timestamp DESC LIMIT 1)
+          `, [quantity, symbol]);
+          
+          console.log(`📦 Acciones reservadas después de pago exitoso: ${quantity} de ${symbol}`);
+        } catch (stockError) {
+          console.error('❌ Error reservando acciones:', stockError);
+          // Continuar con el proceso
+        }
       }
+      
+      console.log(`💰 Pago de $${amount} procesado exitosamente via WebPay para ${isResale ? 'REVENTA' : 'ORIGINAL'}`);
       
       return { success: true };
       

@@ -31,6 +31,9 @@
     "pg": "^8.16.0",
     "sequelize": "^6.37.7",
     "transbank-sdk": "^6.1.0",
+
+    "socket.io": "^4.8.1",
+
     "uuid": "^11.1.0"
   },
   "devDependencies": {

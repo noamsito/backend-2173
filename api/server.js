@@ -12,12 +12,26 @@ import sequelize from './db/db.js';
 import { TransbankService } from './src/services/webpayService.js';
 import webpayRoutes from './src/routes/webpayRoutes.js';
 import { isAdmin, requireAdmin } from './auth-integration.js';
+
 import adminRoutes from './src/routes/adminRoutes.js';
 import { getMyStocks, saveExternalOffer, checkMyProposal, executeExchange, handleMyProposalRejected } from './src/controllers/auctionController.js';
+
+import { createServer } from 'http';
+import { Server } from 'socket.io';
+
 
 const Pool = pg.Pool;
 const app = express();
 const port = 3000;
+
+const server = createServer(app);
+const io = new Server(server, {
+    cors: {
+        origin: ['http://localhost:80', 'http://localhost', 'http://localhost:5173', 
+            process.env.FRONTEND_URL].filter(Boolean),
+        credentials: true
+    }
+});
 
 
 dotenv.config();
@@ -79,9 +93,34 @@ const GROUP_ID = process.env.GROUP_ID || "1";
 // CORREGIDO: Configurar middleware de autenticación Auth0 con las variables correctas
 const checkJwt = auth({
     audience: process.env.AUTH0_AUDIENCE || 'https://stockmarket-api/',
+
     issuerBaseURL: `https://${process.env.AUTH0_DOMAIN || 'dev-ouxdigl1l6bn6n3r.us.auth0.com'}`,
     tokenSigningAlg: 'RS256'
+
 });
+// ✅ AÑADIR middleware de manejo de errores DESPUÉS del checkJwt
+const handleAuthError = (error, req, res, next) => {
+    console.error('🚨 Error de autenticación JWT:', {
+        error: error.message,
+        status: error.status,
+        headers: req.headers.authorization ? 'Token presente' : 'Sin token',
+        path: req.path,
+        auth0_domain: process.env.AUTH0_DOMAIN,
+        auth0_audience: process.env.AUTH0_AUDIENCE,
+        issuer_url: process.env.AUTH0_DOMAIN ? `https://${process.env.AUTH0_DOMAIN}` : 'https://dev-ouxdigl1l6bn6n3r.us.auth0.com'
+    });
+    
+    if (error.name === 'UnauthorizedError') {
+        return res.status(401).json({
+            error: 'Token de autenticación inválido o expirado',
+            details: error.message,
+            path: req.path,
+            auth_error: true
+        });
+    }
+    
+    next(error);
+};
 
 // Webpay routes
 app.use('/webpay', webpayRoutes);
@@ -93,7 +132,7 @@ app.use(cors({
         'http://frontend-grupo1-iic2173.s3-website-us-east-1.amazonaws.com/',
         'http://frontend-grupo1-iic2173.s3-website-us-east-1.amazonaws.com'].filter(Boolean),
     credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
     allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
@@ -125,6 +164,68 @@ try {
 } catch (error) {
     console.error("Error conectando a la base de datos:", error);
 }
+
+// ✅ CONFIGURAR WEBSOCKETS
+io.on('connection', (socket) => {
+    console.log(`🔌 Cliente conectado: ${socket.id}`);
+    
+    // Unirse a room de actualizaciones de stocks
+    socket.join('stock-updates');
+    
+    // Notificar conexión exitosa
+    socket.emit('connected', { 
+        message: 'Conectado al sistema de actualizaciones en tiempo real',
+        timestamp: new Date().toISOString()
+    });
+    
+    socket.on('disconnect', () => {
+        console.log(`🔌 Cliente desconectado: ${socket.id}`);
+    });
+    
+    // Manejar errores de socket
+    socket.on('error', (error) => {
+        console.error('❌ Error en WebSocket:', error);
+    });
+});
+
+// ✅ FUNCIÓN HELPER PARA EMITIR ACTUALIZACIONES
+function broadcastStockUpdate(type, data) {
+    console.log(`📡 Broadcasting ${type}:`, data);
+    io.to('stock-updates').emit('stock-update', {
+        type,
+        data,
+        timestamp: new Date().toISOString()
+    });
+}
+
+// ✅ FUNCIÓN PARA OBTENER NÚMERO DE CLIENTES CONECTADOS
+function getConnectedClientsCount() {
+    return io.engine.clientsCount;
+}
+
+// ✅ ENDPOINT PARA ESTADÍSTICAS DE WEBSOCKET
+app.get('/websocket/stats', (req, res) => {
+    res.json({
+        connected_clients: getConnectedClientsCount(),
+        server_uptime: process.uptime(),
+        timestamp: new Date().toISOString()
+    });
+});
+
+// ✅ ENDPOINT PARA TESTEAR BROADCAST (SOLO PARA DESARROLLO)
+app.post('/websocket/test', (req, res) => {
+    if (process.env.NODE_ENV !== 'development') {
+        return res.status(403).json({ error: 'Solo disponible en desarrollo' });
+    }
+    
+    const { type, data } = req.body;
+    broadcastStockUpdate(type || 'test', data || { message: 'Test broadcast' });
+    
+    res.json({ 
+        message: 'Test broadcast enviado',
+        connected_clients: getConnectedClientsCount()
+    });
+});
 
 // Función helper para registrar eventos
 async function logEvent(type, details) {
@@ -402,97 +503,166 @@ app.get('/stocks', async (req, res) => {
     } = req.query;
 
     try {
+        const isAdmin = req.isAdmin || req.auth?.payload?.['https://stockmarket-app/roles']?.includes('admin');
         let query = `
-            SELECT DISTINCT ON (symbol) *
-            FROM stocks
+            SELECT DISTINCT ON (s.symbol) 
+                s.symbol, 
+                s.price, 
+                s.long_name, 
+                s.quantity, 
+                s.timestamp,
+                CASE 
+                    WHEN s.symbol LIKE '%_r' THEN 'resale'
+                    ELSE 'original'
+                END as stock_type
+            FROM stocks s
+            WHERE s.quantity > 0
         `;
+
+        query += ` ORDER BY s.symbol, s.timestamp DESC`;
         
         const values = [];
         let paramIndex = 1;
-        let whereClauseAdded = false;
+        let havingClause = '';
         
-        // Construir la cláusula WHERE con los filtros
+        // Construir filtros (aplicar después del UNION)
         if (symbol) {
-            query += whereClauseAdded ? ' AND ' : ' WHERE ';
-            query += `symbol ILIKE $${paramIndex}`;
+            havingClause += havingClause ? ' AND ' : ' AND ';
+            havingClause += `s.symbol ILIKE $${paramIndex}`;
             values.push(`%${symbol}%`);
             paramIndex++;
-            whereClauseAdded = true;
         }
         
         if (name) {
-            query += whereClauseAdded ? ' AND ' : ' WHERE ';
-            query += `long_name ILIKE $${paramIndex}`;
+            havingClause += havingClause ? ' AND ' : ' AND ';
+            havingClause += `s.long_name ILIKE $${paramIndex}`;
             values.push(`%${name}%`);
             paramIndex++;
-            whereClauseAdded = true;
         }
         
         if (minPrice) {
-            query += whereClauseAdded ? ' AND ' : ' WHERE ';
-            query += `price >= $${paramIndex}`;
+            havingClause += havingClause ? ' AND ' : ' AND ';
+            havingClause += `s.price >= $${paramIndex}`;
             values.push(parseFloat(minPrice));
             paramIndex++;
-            whereClauseAdded = true;
         }
         
         if (maxPrice) {
-            query += whereClauseAdded ? ' AND ' : ' WHERE ';
-            query += `price <= $${paramIndex}`;
+            havingClause += havingClause ? ' AND ' : ' AND ';
+            havingClause += `s.price <= $${paramIndex}`;
             values.push(parseFloat(maxPrice));
             paramIndex++;
-            whereClauseAdded = true;
         }
         
         if (minQuantity) {
-            query += whereClauseAdded ? ' AND ' : ' WHERE ';
-            query += `quantity >= $${paramIndex}`;
+            havingClause += havingClause ? ' AND ' : ' AND ';
+            havingClause += `s.quantity >= $${paramIndex}`;
             values.push(parseInt(minQuantity));
             paramIndex++;
-            whereClauseAdded = true;
         }
         
         if (maxQuantity) {
-            query += whereClauseAdded ? ' AND ' : ' WHERE ';
-            query += `quantity <= $${paramIndex}`;
+            havingClause += havingClause ? ' AND ' : ' AND ';
+            havingClause += `s.quantity <= $${paramIndex}`;
             values.push(parseInt(maxQuantity));
             paramIndex++;
-            whereClauseAdded = true;
         }
         
         if (date) {
-            query += whereClauseAdded ? ' AND ' : ' WHERE ';
-            query += `timestamp::date = $${paramIndex}`;
+            havingClause += havingClause ? ' AND ' : ' AND ';
+            havingClause += `s.timestamp::date = $${paramIndex}`;
             values.push(date);
             paramIndex++;
-            whereClauseAdded = true;
         }
         
-        // Completar la query con ORDER BY, LIMIT y OFFSET
-        query += ` ORDER BY symbol, timestamp DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+        // Envolver en subquery para aplicar filtros, ordenar y paginar
+        const finalQuery = `
+            SELECT * FROM (${query}) combined_stocks
+            ${havingClause}
+            ORDER BY timestamp DESC 
+            LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
+        `;
         values.push(count, offset);
 
-        const result = await client.query(query, values);
-        res.json({ status: "success", data: result.rows });
+        const result = await client.query(finalQuery, values);
+
+
+        // ✅ FORMATEO MEJORADO - Consultar información de descuento para reventas
+        const formattedStocks = await Promise.all(result.rows.map(async (stock) => {
+            const baseStock = {
+                ...stock,
+                is_resale: stock.symbol.endsWith('_r'),
+                original_symbol: stock.symbol.replace('_r', ''),
+                purchase_id: stock.purchase_id? stock.purchase_id : null,
+            };
+            
+            // Si es reventa, obtener información adicional de descuento
+            if (baseStock.is_resale) {
+                try {
+                    const originalSymbol = stock.symbol.replace('_r', '');
+                    const discountQuery = `
+                        SELECT discount_percentage, original_price
+                        FROM resale_stocks 
+                        WHERE symbol = $1 
+                        ORDER BY created_at DESC 
+                        LIMIT 1
+                    `;
+                    
+                    const discountResult = await client.query(discountQuery, [originalSymbol]);
+                    
+                    if (discountResult.rows.length > 0) {
+                        const discountData = discountResult.rows[0];
+                        
+                        baseStock.discount_info = {
+                            discount_percentage: discountData.discount_percentage,
+                            original_price: discountData.original_price,
+                            savings: (discountData.original_price - stock.price).toFixed(2)
+                        };
+                    } else {
+                        baseStock.discount_info = null;
+                    }
+                } catch (discountError) {
+                    console.error("Error obteniendo información de descuento:", discountError);
+                    baseStock.discount_info = null;
+                }
+            } else {
+                baseStock.discount_info = null;
+            }
+            
+            return baseStock;
+        }));
+        res.json({ status: "success", data: formattedStocks });
     } catch (error) {
         console.error("Error fetching stocks:", error);
         res.status(500).json({ error: "Error fetching stocks" });
     }
 });
 
-// Endpoint de detalle de stock existente
+
+// Endpoint de detalle de stock existente (antiguo)
 app.get('/stocks/:symbol', async (req, res) => {
     const { symbol } = req.params;
     const { price, quantity, date } = req.query;
 
     try {
+        // Unir stocks originales con reventas para el símbolo específico
+        const isResale = symbol.endsWith('_r');
         let query = `
-            SELECT * FROM stocks
-            WHERE symbol = $1
+            SELECT 
+                symbol, price, long_name, quantity, timestamp,
+                CASE 
+                    WHEN symbol LIKE '%_r' THEN 'resale'
+                    ELSE 'original'
+                END as stock_type
+            FROM stocks
+            WHERE symbol = $1 AND quantity > 0
+            ORDER BY timestamp DESC
         `;
+        
         const values = [symbol];
         let index = 2;
-
+        
+        // Aplicar filtros adicionales
         if (price) {
             query += ` AND price <= $${index}`;
             values.push(parseFloat(price));
@@ -500,7 +670,7 @@ app.get('/stocks/:symbol', async (req, res) => {
         }
 
         if (quantity) {
-            query += ` AND quantity <= $${index}`;
+            query += ` AND quantity >= $${index}`;
             values.push(parseInt(quantity));
             index++;
         }
@@ -511,7 +681,8 @@ app.get('/stocks/:symbol', async (req, res) => {
             index++;
         }
 
-        query += ` ORDER BY timestamp DESC;`;
+        // Limitar resultados
+        query += ` LIMIT 1`;
 
         const result = await client.query(query, values);
 
@@ -523,12 +694,47 @@ app.get('/stocks/:symbol', async (req, res) => {
             });
         }
 
-        res.json({ status: "success", data: result.rows });
+        // Formatear respuesta incluyendo información de reventa
+        const stock = result.rows[0];
+
+        let discountInfo = null;
+        if (isResale) {
+            // Buscar información de descuento en resale_stocks
+            const originalSymbol = symbol.replace('_r', '');
+            const discountQuery = `
+                SELECT discount_percentage, original_price
+                FROM resale_stocks 
+                WHERE symbol = $1 
+                ORDER BY created_at DESC 
+                LIMIT 1
+            `;
+            
+            const discountResult = await client.query(discountQuery, [originalSymbol]);
+            
+            if (discountResult.rows.length > 0) {
+                const discountData = discountResult.rows[0];
+                discountInfo = {
+                    discount_percentage: discountData.discount_percentage,
+                    original_price: discountData.original_price,
+                    savings: (discountData.original_price - stock.price).toFixed(2)
+                };
+            }
+        }
+
+        const formattedStock = {
+            ...stock,
+            is_resale: isResale,
+            original_symbol: isResale ? symbol.replace('_r', '') : symbol,
+            discount_info: discountInfo
+        };
+
+        res.json({ status: "success", data: formattedStock });
     } catch (error) {
         console.error("Error fetching stock details:", error);
         res.status(500).json({ error: "Error fetching stock details" });
     }
 });
+
 
 // Endpoints de perfil y registro existentes
 // ...existing code...
@@ -664,37 +870,80 @@ app.get('/wallet/balance', checkJwt, syncUser, async (req, res) => {
 
 // Comprar acciones (versión mejorada)
 // Comprar acciones (versión corregida para WebPay)
-app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
+app.post('/stocks/buy', checkJwt, handleAuthError, syncUser, async (req, res) => {
     try {
         const { symbol, quantity } = req.body;
-        
+
         if (!symbol || !quantity || quantity <= 0) {
             return res.status(400).json({ error: "Solicitud de compra inválida" });
         }
-        
+
+        // ✅ VERIFICAR AUTENTICACIÓN ANTES DE CONTINUAR
+        if (!req.userId) {
+            console.error("❌ Usuario no autenticado correctamente");
+            return res.status(401).json({ 
+                error: "Usuario no autenticado",
+                details: "Token de autenticación requerido"
+            });
+        }
+
+        const isResale = symbol.endsWith('_r');
+        const isAdmin = req.isAdmin || req.auth?.payload?.['https://stockmarket-app/roles']?.includes('admin');
+
         console.log(`Procesando solicitud de compra: ${quantity} acciones de ${symbol}`);
+
+        let stock;
+        let stockQuery;
+        let totalCost;
+
+        if (isResale) {
+
+            console.log(`Procesando compra de reventa: ${symbol}`);
+
+            const stockQuery = `
+                SELECT * FROM stocks 
+                WHERE symbol = $1 AND quantity >= $2
+                ORDER BY timestamp DESC 
+                LIMIT 1
+            `;
+
+            const stockResult = await client.query(stockQuery, [symbol, quantity]);
+
+            if (stockResult.rows.length === 0) {
+                return res.status(404).json({ error: "Acción de reventa no encontrada o cantidad insuficiente" });
+            }
+
+            stock = stockResult.rows[0];
+            totalCost = Math.round(stock.price * quantity);
+            // TODO: lógica especifica para compra de reventa (usuarios regulares)
+            console.log(`Reventa encontrada: ${stock.long_name}, precio: $${stock.price}, disponible: ${stock.quantity}`);
+        } else {
+            if (!isAdmin) {
+                return res.status(403).json({ error: "No tienes permiso para comprar acciones originales" });
+            }
         
-        // Obtener precio actual y disponibilidad de la acción
-        const stockQuery = `
-            SELECT * FROM stocks 
-            WHERE symbol = $1 
-            ORDER BY timestamp DESC 
-            LIMIT 1
-        `;
-        
-        const stockResult = await client.query(stockQuery, [symbol]);
-        
-        if (stockResult.rows.length === 0) {
-            return res.status(404).json({ error: "Acción no encontrada" });
+            // Obtener precio actual y disponibilidad de la acción
+            const stockQuery = `
+                SELECT * FROM stocks 
+                WHERE symbol = $1 
+                ORDER BY timestamp DESC 
+                LIMIT 1
+            `;
+            
+            const stockResult = await client.query(stockQuery, [symbol]);
+            
+            if (stockResult.rows.length === 0) {
+                return res.status(404).json({ error: "Acción no encontrada" });
+            }
+            
+            stock = stockResult.rows[0];
+            
+            if (stock.quantity < quantity) {
+                return res.status(400).json({ error: "No hay suficientes acciones disponibles" });
+            }
+            
+            totalCost = Math.round(stock.price * quantity);
         }
-        
-        const stock = stockResult.rows[0];
-        
-        if (stock.quantity < quantity) {
-            return res.status(400).json({ error: "No hay suficientes acciones disponibles" });
-        }
-        
-        const totalCost = stock.price * quantity;
 
         // ✅ SIN VERIFICACIÓN DE WALLET - El pago se valida via WebPay
         console.log(`💰 Total a pagar: $${totalCost} (será validado por WebPay)`);
@@ -713,7 +962,7 @@ app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
             totalCost,
             returnUrl
         );
-        
+            
         if (!webpayResult.success) {
             console.error("Error al crear transacción webpay:", webpayResult.error);
             return res.status(500).json({
@@ -731,7 +980,7 @@ app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
             VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7, $8, NOW())
             RETURNING id
         `;
-        
+            
         await client.query(webpayTransactionQuery, [
             req.userId,
             buyOrder,
@@ -746,24 +995,24 @@ app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
         // 3. CREAR SOLICITUD DE COMPRA EN PURCHASE_REQUESTS
         const purchaseQuery = `
             INSERT INTO purchase_requests 
-            (request_id, user_id, symbol, quantity, price, status) 
-            VALUES ($1, $2, $3, $4, $5, 'PENDING')
+            (request_id, user_id, symbol, quantity, price, status, is_resale) 
+            VALUES ($1, $2, $3, $4, $5, 'PENDING', $6)
             RETURNING id
         `;
-        
+            
         await client.query(purchaseQuery, [
             requestId, 
             req.userId,
             symbol, 
             quantity, 
-            stock.price
+            stock.price,
+            isResale
         ]);
 
         // 4. RESERVAR ACCIONES TEMPORALMENTE
         console.log(`📊 Acciones disponibles: ${stock.quantity}, solicitadas: ${quantity}`);
 
         console.log(`💾 Solicitud de compra creada: ${requestId}, esperando confirmación de pago WebPay`);
-
         // 6. REGISTRAR EVENTO
         await logEvent('PURCHASE_REQUEST', {
             request_id: requestId,
@@ -773,20 +1022,40 @@ app.post('/stocks/buy', checkJwt, syncUser, async (req, res) => {
             price: stock.price,
             group_id: GROUP_ID,
             webpay_token: webpayResult.token,
-            deposit_token: webpayResult.token
+            deposit_token: webpayResult.token,
+            purchase_type: isResale ? 'resale' : 'original',
+            is_admin_purchase: isAdmin
         });
         
         // 7. RETORNAR DATOS PARA REDIRECCIÓN A WEBPAY
         res.json({
-            message: "Transacción de pago creada exitosamente",
+            message: isResale ? 
+                "Transacción de pago para reventa creada exitosamente" : 
+                "Transacción de pago creada exitosamente",
             requiresPayment: true,
             webpayUrl: webpayResult.url,
             webpayToken: webpayResult.token,
-            request_id: requestId
+            request_id: requestId,
+            purchase_type: isResale ? 'resale' : 'original',
+            stock_info: {
+                symbol: stock.symbol,
+                long_name: stock.long_name,
+                quantity: quantity,
+                price: stock.price,
+                total_cost: totalCost
+            }
         });
-        
+            
     } catch (error) {
         console.error("Error procesando compra:", error);
+        // ✅ MEJOR MANEJO DE ERRORES DE AUTENTICACIÓN
+        if (error.message?.includes('jwt') || error.message?.includes('token') || error.message?.includes('Unauthorized')) {
+            return res.status(401).json({
+                error: "Token de autenticación inválido o expirado",
+                details: "Por favor, inicia sesión nuevamente",
+                auth_error: true
+            });
+        }
         res.status(500).json({ error: "Error interno del servidor" });
     }
 });
@@ -992,15 +1261,34 @@ app.post('/external-purchase', async (req, res) => {
     try {
         const purchase = req.body;
         
+        console.log(`🔄 Recibida compra externa:`, purchase);
+        
+        // ✅ VALIDACIÓN MEJORADA
         if (!purchase.symbol || !purchase.quantity || !purchase.request_id) {
-            return res.status(400).json({ error: "Datos de compra inválidos" });
+            console.error('❌ Datos de compra externa inválidos:', purchase);
+            return res.status(400).json({ 
+                error: "Datos de compra inválidos",
+                required: ["symbol", "quantity", "request_id"],
+                received: Object.keys(purchase)
+            });
         }
+        // Validar que quantity sea un número positivo
+        const quantity = parseInt(purchase.quantity);
+        if (isNaN(quantity) || quantity <= 0) {
+            return res.status(400).json({ 
+                error: "Cantidad debe ser un número positivo",
+                received: purchase.quantity
+            });
+        }
+        
         
         console.log(`Procesando compra externa: ${purchase.quantity} acciones de ${purchase.symbol}, request_id: ${purchase.request_id}`);
         
         // Obtener la entrada más reciente de la acción
+        // ✅ OBTENER STOCK ACTUAL CON MÁS INFORMACIÓN
         const stockQuery = `
-            SELECT id, quantity, symbol FROM stocks 
+            SELECT id, symbol, quantity, price, long_name, timestamp
+            FROM stocks 
             WHERE symbol = $1 
             ORDER BY timestamp DESC 
             LIMIT 1
@@ -1014,31 +1302,129 @@ app.post('/external-purchase', async (req, res) => {
         }
         
         const stock = stockResult.rows[0];
+        console.log(`📊 Stock encontrado: ${stock.long_name}, disponible: ${stock.quantity}, precio: $${stock.price}`);
         
-        // Verificar si hay suficientes acciones
-        if (stock.quantity < purchase.quantity) {
-            console.log(`No hay suficientes acciones de ${purchase.symbol} disponibles (tenemos ${stock.quantity}, se pidieron ${purchase.quantity})`);
+        // ✅ VERIFICAR DISPONIBILIDAD
+        if (stock.quantity < quantity) {
+            console.error(`❌ Stock insuficiente: ${stock.quantity} < ${quantity}`);
+            
+            // ✅ NOTIFICAR FALTA DE STOCK VIA WEBSOCKET
+            broadcastStockUpdate('insufficient_stock', {
+                symbol: purchase.symbol,
+                long_name: stock.long_name,
+                requested_quantity: quantity,
+                available_quantity: stock.quantity,
+                group_id: purchase.group_id || 'unknown',
+                request_id: purchase.request_id
+            });
+            
             return res.status(400).json({ 
-                error: `No hay suficientes acciones de ${purchase.symbol} disponibles` 
+                error: `Stock insuficiente para ${purchase.symbol}`,
+                details: {
+                    requested: quantity,
+                    available: stock.quantity,
+                    shortfall: quantity - stock.quantity
+                }
             });
         }
         
-        // Actualizar cantidad de acciones
-        await client.query(`
+        // ✅ ACTUALIZAR INVENTARIO
+        const updateResult = await client.query(`
             UPDATE stocks 
-            SET quantity = quantity - $1 
+            SET quantity = quantity - $1,
+                timestamp = CURRENT_TIMESTAMP
             WHERE id = $2
-        `, [purchase.quantity, stock.id]);
+            RETURNING quantity
+        `, [quantity, stock.id]);
         
-        console.log(`Actualizado inventario para compra externa: ${purchase.symbol}, -${purchase.quantity} acciones`);
+        const newQuantity = updateResult.rows[0].quantity;
         
-        // Registrar evento
-        await logEvent('EXTERNAL_PURCHASE', purchase);
+        console.log(`✅ Inventario actualizado: ${purchase.symbol} ${stock.quantity} → ${newQuantity} (-${quantity})`);
         
-        res.json({ status: "success" });
+        // ✅ REGISTRAR EVENTO EN BASE DE DATOS
+        await logEvent('EXTERNAL_PURCHASE', {
+            ...purchase,
+            original_quantity: stock.quantity,
+            new_quantity: newQuantity,
+            price_at_time: stock.price,
+            total_value: stock.price * quantity,
+            processed_at: new Date().toISOString()
+        });
+        
+        // ✅ EMITIR ACTUALIZACIÓN VIA WEBSOCKET
+        broadcastStockUpdate('external_purchase', {
+            symbol: purchase.symbol,
+            long_name: stock.long_name,
+            quantity_purchased: quantity,
+            original_quantity: stock.quantity,
+            remaining_quantity: newQuantity,
+            price: stock.price,
+            total_value: (stock.price * quantity).toFixed(2),
+            group_id: purchase.group_id || 'unknown',
+            request_id: purchase.request_id,
+            buyer_info: {
+                user_id: purchase.user_id || 'unknown',
+                group_id: purchase.group_id || 'unknown'
+            },
+            // ✅ INFORMACIÓN ÚTIL PARA EL FRONTEND
+            percentage_sold: ((quantity / stock.quantity) * 100).toFixed(1),
+            is_low_stock: newQuantity < 10,
+            is_out_of_stock: newQuantity === 0
+        });
+        
+        // ✅ SI QUEDA POCO STOCK, ENVIAR ALERTA ADICIONAL
+        if (newQuantity < 10 && newQuantity > 0) {
+            broadcastStockUpdate('low_stock_alert', {
+                symbol: purchase.symbol,
+                long_name: stock.long_name,
+                remaining_quantity: newQuantity,
+                threshold: 10
+            });
+        }
+        
+        // ✅ SI SE AGOTÓ EL STOCK, ENVIAR ALERTA
+        if (newQuantity === 0) {
+            broadcastStockUpdate('out_of_stock', {
+                symbol: purchase.symbol,
+                long_name: stock.long_name,
+                last_purchase: {
+                    quantity: quantity,
+                    group_id: purchase.group_id || 'unknown'
+                }
+            });
+        }
+        
+        // ✅ RESPUESTA EXITOSA CON MÁS INFORMACIÓN
+        res.json({ 
+            status: "success", 
+            message: "Compra externa procesada exitosamente",
+            data: {
+                symbol: purchase.symbol,
+                long_name: stock.long_name,
+                quantity_purchased: quantity,
+                remaining_quantity: newQuantity,
+                price_per_share: stock.price,
+                total_transaction_value: (stock.price * quantity).toFixed(2),
+                connected_clients: getConnectedClientsCount(),
+                timestamp: new Date().toISOString()
+            }
+        });
+        
     } catch (error) {
-        console.error("Error procesando compra externa:", error);
-        res.status(500).json({ error: "Error interno del servidor" });
+        console.error("❌ Error procesando compra externa:", error);
+        
+        // ✅ EMITIR ERROR VIA WEBSOCKET
+        broadcastStockUpdate('external_purchase_error', {
+            error: error.message,
+            request_data: req.body,
+            timestamp: new Date().toISOString()
+        });
+        
+        res.status(500).json({ 
+            error: "Error interno del servidor",
+            details: process.env.NODE_ENV === 'development' ? error.message : 'Error procesando compra externa',
+            request_id: req.body?.request_id || null
+        });
     }
 });
 
@@ -1444,130 +1830,217 @@ app.get('/purchase/:requestId/estimation', checkJwt, syncUser, async (req, res) 
         res.status(500).json({ error: 'Error obteniendo estimación de compra' });
     }
 });
-app.listen(port, '0.0.0.0',() => {
-    console.log(`Servidor ejecutándose en http://localhost:${port}`);
-});
-/* HARDCODEADO PARA QUE COMPRAS DE ADMIN SEAN DISTINTAS. PROBABLEMENTE HAY QUE CAMBIARLO/BORRARLO
-// Endpoint para compras administrativas
-app.post('/admin/stocks/buy', checkJwt, syncUser, requireAdmin, async (req, res) => {
+
+// Endpoint para crear reventa de acciones (solo administradores)
+app.post('/admin/stocks/resale', checkJwt, syncUser, requireAdmin, async (req, res) => {
     try {
-        const { symbol, quantity } = req.body;
+        const { purchase_id, quantity, discount_percentage } = req.body;
+        console.log('DEBUGGGGGGGGGGGGGGGGGGGGGGGG')
+        console.log('purchase_id:', purchase_id);
         
-        if (!symbol || !quantity || quantity <= 0) {
-            return res.status(400).json({ error: "Solicitud de compra inválida" });
+        // Validaciones
+        if (!purchase_id || !quantity || quantity <= 0) {
+            return res.status(400).json({ error: "Datos de reventa inválidos" });
         }
         
-        console.log(`Procesando compra administrativa: ${quantity} acciones de ${symbol}`);
+        if (!discount_percentage || discount_percentage < 0 || discount_percentage > 10) {
+            return res.status(400).json({ 
+                error: "El descuento debe estar entre 0% y 10%" 
+            });
+        }
         
-        // Obtener precio actual y disponibilidad de la acción
-        const stockQuery = `
-            SELECT * FROM stocks 
-            WHERE symbol = $1 
-            ORDER BY timestamp DESC 
+        // ✅ VERIFICAR QUE LA COMPRA EXISTE, ESTÁ ACEPTADA Y PERTENECE AL ADMIN
+        const purchaseQuery = `
+            SELECT pr.*, s.long_name 
+            FROM purchase_requests pr
+            LEFT JOIN stocks s ON pr.symbol = s.symbol
+            WHERE pr.id = $1 AND pr.user_id = $2 AND pr.status = 'ACCEPTED'
+            ORDER BY s.timestamp DESC
             LIMIT 1
         `;
         
-        const stockResult = await client.query(stockQuery, [symbol]);
+        const purchaseResult = await client.query(purchaseQuery, [purchase_id, req.userId]);
         
-        if (stockResult.rows.length === 0) {
-            return res.status(404).json({ error: "Acción no encontrada" });
+        if (purchaseResult.rows.length === 0) {
+            return res.status(404).json({ 
+                error: "Compra no encontrada o no autorizada" 
+            });
         }
         
-        const stock = stockResult.rows[0];
+        const purchase = purchaseResult.rows[0];
+
+        // Calcular precio de reventa
+        const originalPrice = parseFloat(purchase.price);
+        const discountAmount = originalPrice * (discount_percentage / 100);
+        const resalePrice = originalPrice - discountAmount;
+
+        // Crear stock con symbol modificado
+        const resaleSymbol = `${purchase.symbol}_r`;
         
-        if (stock.quantity < quantity) {
-            return res.status(400).json({ error: "No hay suficientes acciones disponibles" });
-        }
-        
-        const totalCost = stock.price * quantity;
-        const requestId = uuidv4();
-        
-        // Para administradores: procesar directamente sin WebPay
-        // 1. Actualizar inventario de acciones
-        await client.query(`
-            UPDATE stocks 
-            SET quantity = quantity - $1 
-            WHERE id = $2
-        `, [quantity, stock.id]);
-        
-        // 2. Crear registro de compra administrativa
-        const purchaseQuery = `
-            INSERT INTO purchase_requests 
-            (request_id, user_id, symbol, quantity, price, status, is_admin_purchase) 
-            VALUES ($1, $2, $3, $4, $5, 'ACCEPTED', TRUE)
-            RETURNING id
+        // Verificar si ya hay una reventa para esta compra
+        const existingResaleQuery = `
+            SELECT quantity FROM stocks 
+            WHERE symbol = $1 
+            ORDER BY timestamp DESC
+            LIMIT 1
         `;
-        
-        await client.query(purchaseQuery, [
-            requestId, 
-            req.userId,
-            symbol, 
-            quantity, 
-            stock.price
+
+        const existingResale = await client.query(existingResaleQuery, [resaleSymbol]);
+        const alreadyForSale = existingResale.rows[0]?.quantity || 0;
+
+        if (existingResale.rows.length > 0) {
+            // Actualizar stock existente (sumar cantidad)
+            const newQuantity = existingResale.rows[0].quantity + quantity;
+            
+            await client.query(`
+                INSERT INTO stocks (symbol, price, long_name, quantity, timestamp)
+                VALUES ($1, $2, $3, $4, NOW())
+            `, [resaleSymbol, resalePrice, purchase.long_name, newQuantity]);
+            
+        } else {
+            // Crear nueva stock de reventa
+            await client.query(`
+                INSERT INTO stocks (symbol, price, long_name, quantity, timestamp)
+                VALUES ($1, $2, $3, $4, NOW())
+            `, [resaleSymbol, resalePrice, purchase.long_name, quantity]);
+        }
+
+        // Mantener registro en resale_stocks para tracking (opcional)
+        await client.query(`
+            INSERT INTO resale_stocks 
+            (original_purchase_id, admin_user_id, symbol, quantity, original_price, 
+             discount_percentage, resale_price, long_name, available_quantity)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        `, [
+            purchase_id, req.userId, purchase.symbol, quantity, originalPrice,
+            discount_percentage, resalePrice, purchase.long_name, quantity
         ]);
         
-        // 3. Enviar solicitud por MQTT al canal stocks/requests
-        await sendStockRequest(symbol, quantity, stock.price, requestId);
+        console.log(`Reventa creada: ${quantity} acciones de ${purchase.symbol} con ${discount_percentage}% descuento`);
         
-        // 4. Registrar evento
-        await logEvent('ADMIN_PURCHASE', {
-            request_id: requestId,
-            user_id: req.userId,
-            symbol: symbol,
+        // Registrar evento
+        await logEvent('ADMIN_RESALE', {
+            purchase_id: purchase_id,
+            admin_id: req.userId,
+            symbol: resaleSymbol,
+            original_symbol: purchase.symbol,
             quantity: quantity,
-            price: stock.price,
-            group_id: GROUP_ID,
-            stock_origin: GROUP_ID // Cambiar por número de grupo
+            original_price: originalPrice,
+            discount_percentage: discount_percentage,
+            resale_price: resalePrice
         });
         
         res.json({
-            message: "Compra administrativa procesada exitosamente",
-            request_id: requestId,
-            symbol: symbol,
+            message: "Reventa creada exitosamente",
+            symbol: purchase.symbol,
             quantity: quantity,
-            total_cost: totalCost
+            original_price: originalPrice,
+            discount_percentage: discount_percentage,
+            resale_price: resalePrice,
+            savings: discountAmount.toFixed(2)
         });
         
     } catch (error) {
-        console.error("Error procesando compra administrativa:", error);
+        console.error("Error creando reventa:", error);
         res.status(500).json({ error: "Error interno del servidor" });
     }
 });
 
-// Función para enviar solicitud MQTT
-async function sendStockRequest(symbol, quantity, price, requestId) {
+// Endpoint para actualizar descuento de reventa (solo administradores)
+app.patch('/admin/stocks/resale/:resale_id', checkJwt, syncUser, requireAdmin, async (req, res) => {
     try {
-        const message = {
-            request_id: requestId,
-            symbol: symbol,
-            quantity: quantity,
-            price: price,
-            stock_origin: GROUP_ID, // Tu número de grupo
-            timestamp: new Date().toISOString()
-        };
+        const { resale_id } = req.params;
+        const { discount_percentage } = req.body;
+        console.log('DEBUGGGGGGGGGGGGGGGGGGGGGGGG')
+        console.log('resale_id:', resale_id);
         
-        // Aquí implementarías el envío MQTT al canal stocks/requests
-        // Ejemplo usando mqtt client:
-        /*
-        const mqtt = require('mqtt');
-        const client = mqtt.connect(process.env.MQTT_BROKER_URL);
+        // Validaciones
+        if (!discount_percentage || discount_percentage < 0 || discount_percentage > 10) {
+            return res.status(400).json({ 
+                error: "El descuento debe estar entre 0% y 10%" 
+            });
+        }
         
-        client.publish('stocks/requests', JSON.stringify(message), (err) => {
-            if (err) {
-                console.error('Error enviando mensaje MQTT:', err);
-            } else {
-                console.log('Solicitud enviada por MQTT:', message);
+        // Verificar que la reventa existe (cualquier admin puede editarla)
+        const resaleQuery = `
+            SELECT rs.*, pr.symbol, pr.price as original_price 
+            FROM resale_stocks rs
+            JOIN purchase_requests pr ON rs.original_purchase_id = pr.id
+            WHERE rs.original_purchase_id = $1
+        `;
+        
+        const resaleResult = await client.query(resaleQuery, [resale_id]);
+        
+        if (resaleResult.rows.length === 0) {
+            return res.status(404).json({ 
+                error: "Reventa no encontrada" 
+            });
+        }
+        
+        const resale = resaleResult.rows[0];
+        
+        // Calcular nuevo precio de reventa
+        const originalPrice = parseFloat(resale.original_price);
+        const newDiscountAmount = originalPrice * (discount_percentage / 100);
+        const newResalePrice = originalPrice - newDiscountAmount;
+        
+        // Symbol de la reventa
+        const resaleSymbol = `${resale.symbol}_r`;
+        
+        // 1. Actualizar en resale_stocks
+        await client.query(`
+            UPDATE resale_stocks 
+            SET discount_percentage = $1, 
+                resale_price = $2,
+                updated_at = NOW()
+            WHERE original_purchase_id = $3
+        `, [discount_percentage, newResalePrice, resale_id]);
+        
+        // 2. Crear nueva entrada en stocks con el precio actualizado
+        await client.query(`
+            INSERT INTO stocks (symbol, price, long_name, quantity, timestamp)
+            VALUES ($1, $2, $3, $4, NOW())
+        `, [resaleSymbol, newResalePrice, resale.long_name, resale.available_quantity]);
+        
+        console.log(`Descuento actualizado para ${resale.symbol}: ${discount_percentage}%`);
+        
+        // Registrar evento
+        await logEvent('ADMIN_RESALE_UPDATE', {
+            purchase_id: resale_id,
+            admin_id: req.userId,
+            symbol: resale.symbol,
+            old_discount: resale.discount_percentage,
+            new_discount: discount_percentage,
+            old_price: resale.resale_price,
+            new_price: newResalePrice
+        });
+        
+        // ✅ RESPUESTA COMPLETA para que el frontend actualice la UI
+        res.json({
+            status: "success",
+            message: "Descuento actualizado exitosamente",
+            data: {
+                purchase_id: resale_id,
+                symbol: resale.symbol,
+                resale_symbol: resaleSymbol,
+                old_discount: resale.discount_percentage,
+                new_discount: discount_percentage,
+                old_price: resale.resale_price,
+                new_price: newResalePrice,
+                original_price: originalPrice,
+                savings: newDiscountAmount.toFixed(2),
+                quantity: resale.available_quantity,
+                long_name: resale.long_name
             }
         });
-        */
-       /*
         
-        console.log('Mensaje a enviar por MQTT:', message);
     } catch (error) {
-        console.error('Error enviando solicitud MQTT:', error);
+        console.error("Error actualizando descuento:", error);
+        res.status(500).json({ error: "Error interno del servidor" });
     }
-}
+});
 
-*/
-
-// Endpoint para obtener información del usuario actua
+server.listen(port, '0.0.0.0',() => {
+    console.log(`🚀 Servidor con WebSockets ejecutándose en http://localhost:${port}`);
+    console.log(`📡 WebSocket server listo para actualizaciones en tiempo real`);
+});
