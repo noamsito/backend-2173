@@ -330,6 +330,14 @@ async function logEvent(type, details) {
         return null;
     }
 }
+
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'OK', 
+    timestamp: new Date().toISOString(),
+    port: process.env.PORT || 3000
+  });
+});
     
 app.post('/stocks', async (req, res) => {
     const { topic, message } = req.body;
